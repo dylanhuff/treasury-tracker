@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
 	"go.uber.org/zap"
 	"treasury-tracker/internal/database"
 	"treasury-tracker/internal/utils"
@@ -23,9 +24,9 @@ type TransactionService struct {
 
 type PurchaseResult struct {
 	User          *database.User
-	PurchasePrice float64
-	FaceValue     float64
-	Discount      float64
+	PurchasePrice decimal.Decimal
+	FaceValue     decimal.Decimal
+	Discount      decimal.Decimal
 }
 
 func NewTransactionService(queries *database.Queries, pool *pgxpool.Pool, logger *zap.Logger) *TransactionService {
@@ -152,29 +153,29 @@ func (s *TransactionService) BuyTreasury(
 		return nil, fmt.Errorf("invalid term: %w", err)
 	}
 
-	faceValueFloat, err := faceValue.Float64Value()
+	faceValueDec, err := numericToDecimal(faceValue)
 	if err != nil {
 		return nil, &ValidationError{Message: "invalid face value format"}
 	}
-	if !faceValueFloat.Valid || faceValueFloat.Float64 <= 0 {
+	if faceValueDec.LessThanOrEqual(decimal.Zero) {
 		return nil, &ValidationError{Message: "face value must be greater than zero"}
 	}
 
-	yieldRateFloat, err := currentYield.Float64Value()
+	yieldRateDec, err := numericToDecimal(currentYield)
 	if err != nil {
 		return nil, &ValidationError{Message: "invalid yield rate format"}
 	}
-	if !yieldRateFloat.Valid || yieldRateFloat.Float64 < 0 {
+	if yieldRateDec.LessThan(decimal.Zero) {
 		return nil, &ValidationError{Message: "yield rate must be non-negative"}
 	}
 
-	purchasePriceFloat, err := calculatePurchasePrice(securityType, faceValueFloat.Float64, yieldRateFloat.Float64, term)
+	purchasePriceDec, err := calculatePurchasePrice(securityType, faceValueDec, yieldRateDec, term)
 	if err != nil {
 		return nil, err
 	}
 
 	purchasePrice := pgtype.Numeric{}
-	if err := purchasePrice.Scan(fmt.Sprintf("%.2f", purchasePriceFloat)); err != nil {
+	if err := purchasePrice.Scan(purchasePriceDec.StringFixed(2)); err != nil {
 		return nil, fmt.Errorf("failed to create purchase price: %w", err)
 	}
 
@@ -188,13 +189,13 @@ func (s *TransactionService) BuyTreasury(
 			return fmt.Errorf("failed to get user: %w", err)
 		}
 
-		currentBalanceFloat, err := currentUser.Balance.Float64Value()
+		currentBalanceDec, err := numericToDecimal(currentUser.Balance)
 		if err != nil {
 			return fmt.Errorf("invalid balance format: %w", err)
 		}
-		if !currentBalanceFloat.Valid || currentBalanceFloat.Float64 < purchasePriceFloat {
-			return fmt.Errorf("%w: need %.2f, have %.2f", ErrInsufficientBalance,
-				purchasePriceFloat, currentBalanceFloat.Float64)
+		if currentBalanceDec.LessThan(purchasePriceDec) {
+			return fmt.Errorf("%w: need %s, have %s", ErrInsufficientBalance,
+				purchasePriceDec.StringFixed(2), currentBalanceDec.StringFixed(2))
 		}
 
 		holding, err := qtx.CreateHolding(ctx, database.CreateHoldingParams{
@@ -213,7 +214,7 @@ func (s *TransactionService) BuyTreasury(
 		}
 
 		negativePurchasePrice := pgtype.Numeric{}
-		if err := negativePurchasePrice.Scan(fmt.Sprintf("-%.2f", purchasePriceFloat)); err != nil {
+		if err := negativePurchasePrice.Scan("-" + purchasePriceDec.StringFixed(2)); err != nil {
 			return fmt.Errorf("failed to create negative purchase price: %w", err)
 		}
 
@@ -248,9 +249,9 @@ func (s *TransactionService) BuyTreasury(
 
 	return &PurchaseResult{
 		User:          updatedUser,
-		PurchasePrice: purchasePriceFloat,
-		FaceValue:     faceValueFloat.Float64,
-		Discount:      faceValueFloat.Float64 - purchasePriceFloat,
+		PurchasePrice: purchasePriceDec,
+		FaceValue:     faceValueDec,
+		Discount:      faceValueDec.Sub(purchasePriceDec),
 	}, nil
 }
 
@@ -341,14 +342,14 @@ func (s *TransactionService) SellTreasury(
 	return updatedUser, err
 }
 
-func calculatePurchasePrice(securityType string, faceValue, yieldRate float64, term string) (float64, error) {
+func calculatePurchasePrice(securityType string, faceValue, yieldRate decimal.Decimal, term string) (decimal.Decimal, error) {
 	switch securityType {
 	case utils.SecurityTypeBill:
 		return utils.CalculateBillPrice(faceValue, yieldRate, term)
 	case utils.SecurityTypeNote, utils.SecurityTypeBond:
 		return utils.CalculateNoteBondPrice(faceValue, yieldRate, term)
 	default:
-		return 0, fmt.Errorf("unknown security type: %s", securityType)
+		return decimal.Zero, fmt.Errorf("unknown security type: %s", securityType)
 	}
 }
 
@@ -371,25 +372,37 @@ func calculateSellProceeds(holding database.Holding, sellAmount float64) (float6
 		return 0, errors.New("invalid holding: purchase date is in the future")
 	}
 
-	yieldRateFloat, err := holding.YieldAtPurchase.Float64Value()
-	if err != nil || !yieldRateFloat.Valid {
+	yieldRateDec, err := numericToDecimal(holding.YieldAtPurchase)
+	if err != nil {
 		return 0, fmt.Errorf("invalid yield rate for holding: %w", err)
 	}
 
-	maturityValue, err := utils.CalculateNoteBondMaturityValue(sellAmount, yieldRateFloat.Float64, daysHeld)
+	sellAmountDec := decimal.NewFromFloat(sellAmount)
+	maturityValue, err := utils.CalculateNoteBondMaturityValue(sellAmountDec, yieldRateDec, daysHeld)
 	if err != nil {
 		return 0, fmt.Errorf("failed to calculate maturity value: %w", err)
 	}
 
+	maturityFloat, _ := maturityValue.Float64()
+
 	zap.L().Info("Selling holding",
 		zap.String("security_type", securityType),
 		zap.Float64("principal", sellAmount),
-		zap.Float64("yield", yieldRateFloat.Float64),
+		zap.String("yield", yieldRateDec.String()),
 		zap.Int("days_held", daysHeld),
-		zap.Float64("proceeds", maturityValue),
+		zap.Float64("proceeds", maturityFloat),
 	)
 
-	return maturityValue, nil
+	return maturityFloat, nil
+}
+
+// numericToDecimal converts a pgtype.Numeric to decimal.Decimal.
+func numericToDecimal(n pgtype.Numeric) (decimal.Decimal, error) {
+	f, err := n.Float64Value()
+	if err != nil || !f.Valid {
+		return decimal.Zero, fmt.Errorf("invalid numeric")
+	}
+	return decimal.NewFromFloat(f.Float64), nil
 }
 
 func handleBalanceConstraint(err error) error {

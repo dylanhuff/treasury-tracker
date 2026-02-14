@@ -1,10 +1,14 @@
 package models
 
-import "encoding/xml"
+import (
+	"encoding/xml"
+
+	"github.com/shopspring/decimal"
+)
 
 type YieldPoint struct {
-	Term string  `json:"term"`
-	Rate float64 `json:"rate"`
+	Term string          `json:"term"`
+	Rate decimal.Decimal `json:"rate"`
 }
 
 type YieldData struct {
@@ -30,10 +34,10 @@ type Entry struct {
 }
 
 type YieldDataPoint struct {
-	Date    string  `json:"date"`
-	Yield2Y float64 `json:"2Y"`
-	Yield5Y float64 `json:"5Y"`
-	Yield10Y float64 `json:"10Y"`
+	Date     string          `json:"date"`
+	Yield2Y  decimal.Decimal `json:"2Y"`
+	Yield5Y  decimal.Decimal `json:"5Y"`
+	Yield10Y decimal.Decimal `json:"10Y"`
 }
 
 type HistoricalYieldData struct {

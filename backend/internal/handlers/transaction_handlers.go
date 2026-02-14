@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/shopspring/decimal"
 	"go.uber.org/zap"
 	"treasury-tracker/internal/database"
 	"treasury-tracker/internal/models"
@@ -60,11 +61,11 @@ type TransactionResponse struct {
 }
 
 type BuyResponse struct {
-	Success       bool           `json:"success"`
-	User          *database.User `json:"user"`
-	FaceValue     float64        `json:"face_value"`
-	PurchasePrice float64        `json:"purchase_price"`
-	Discount      float64        `json:"discount"`
+	Success       bool            `json:"success"`
+	User          *database.User  `json:"user"`
+	FaceValue     decimal.Decimal `json:"face_value"`
+	PurchasePrice decimal.Decimal `json:"purchase_price"`
+	Discount      decimal.Decimal `json:"discount"`
 }
 
 var validTerms = map[string]bool{
@@ -168,7 +169,7 @@ func (h *TransactionHandlers) BuyHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	currentYield := pgtype.Numeric{}
-	if err := currentYield.Scan(fmt.Sprintf("%.2f", yieldRate)); err != nil {
+	if err := currentYield.Scan(yieldRate.StringFixed(2)); err != nil {
 		respondWithError(w, http.StatusInternalServerError, "invalid yield format")
 		return
 	}
@@ -227,7 +228,7 @@ func (h *TransactionHandlers) SellHandler(w http.ResponseWriter, r *http.Request
 	}
 
 	currentYield := pgtype.Numeric{}
-	if err := currentYield.Scan(fmt.Sprintf("%.2f", yieldRate)); err != nil {
+	if err := currentYield.Scan(yieldRate.StringFixed(2)); err != nil {
 		respondWithError(w, http.StatusInternalServerError, "invalid yield format")
 		return
 	}
@@ -242,11 +243,11 @@ func (h *TransactionHandlers) SellHandler(w http.ResponseWriter, r *http.Request
 	respondWithJSON(w, http.StatusOK, TransactionResponse{Success: true, User: user})
 }
 
-func findYieldRate(yields []models.YieldPoint, term string) (float64, bool) {
+func findYieldRate(yields []models.YieldPoint, term string) (decimal.Decimal, bool) {
 	for _, y := range yields {
 		if y.Term == term {
 			return y.Rate, true
 		}
 	}
-	return 0, false
+	return decimal.Zero, false
 }

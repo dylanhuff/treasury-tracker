@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
 	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
 
@@ -186,9 +187,9 @@ func (s *TreasuryService) GetHistoricalYields(period string) (*models.Historical
 	for _, row := range rows {
 		dataPoints = append(dataPoints, models.YieldDataPoint{
 			Date:     row.Date.Time.Format("2006-01-02"),
-			Yield2Y:  numericToFloat(row.Bc2year),
-			Yield5Y:  numericToFloat(row.Bc5year),
-			Yield10Y: numericToFloat(row.Bc10year),
+			Yield2Y:  numericToDecimalSafe(row.Bc2year),
+			Yield5Y:  numericToDecimalSafe(row.Bc5year),
+			Yield10Y: numericToDecimalSafe(row.Bc10year),
 		})
 	}
 
@@ -213,14 +214,14 @@ func (s *TreasuryService) GetLatestYields() (*models.YieldData, error) {
 	return &models.YieldData{
 		Date: row.Date.Time.Format("2006-01-02"),
 		Yields: []models.YieldPoint{
-			{Term: "1M", Rate: numericToFloat(row.Bc1month)},
-			{Term: "3M", Rate: numericToFloat(row.Bc3month)},
-			{Term: "6M", Rate: numericToFloat(row.Bc6month)},
-			{Term: "1Y", Rate: numericToFloat(row.Bc1year)},
-			{Term: "2Y", Rate: numericToFloat(row.Bc2year)},
-			{Term: "5Y", Rate: numericToFloat(row.Bc5year)},
-			{Term: "10Y", Rate: numericToFloat(row.Bc10year)},
-			{Term: "30Y", Rate: numericToFloat(row.Bc30year)},
+			{Term: "1M", Rate: numericToDecimalSafe(row.Bc1month)},
+			{Term: "3M", Rate: numericToDecimalSafe(row.Bc3month)},
+			{Term: "6M", Rate: numericToDecimalSafe(row.Bc6month)},
+			{Term: "1Y", Rate: numericToDecimalSafe(row.Bc1year)},
+			{Term: "2Y", Rate: numericToDecimalSafe(row.Bc2year)},
+			{Term: "5Y", Rate: numericToDecimalSafe(row.Bc5year)},
+			{Term: "10Y", Rate: numericToDecimalSafe(row.Bc10year)},
+			{Term: "30Y", Rate: numericToDecimalSafe(row.Bc30year)},
 		},
 	}, nil
 }
@@ -254,13 +255,13 @@ func numericFromFloat(f float64) pgtype.Numeric {
 	return n
 }
 
-// numericToFloat converts a pgtype.Numeric to float64.
-func numericToFloat(n pgtype.Numeric) float64 {
+// numericToDecimalSafe converts a pgtype.Numeric to decimal.Decimal, returning Zero on error.
+func numericToDecimalSafe(n pgtype.Numeric) decimal.Decimal {
 	f, err := n.Float64Value()
 	if err != nil || !f.Valid {
-		return 0
+		return decimal.Zero
 	}
-	return f.Float64
+	return decimal.NewFromFloat(f.Float64)
 }
 
 func calculateDateRange(period string) (startDate, endDate time.Time, err error) {
