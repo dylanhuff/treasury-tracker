@@ -264,11 +264,11 @@ func (s *TransactionService) SellTreasury(
 	amount pgtype.Numeric,
 	currentYield pgtype.Numeric,
 ) (*database.User, error) {
-	amountFloat, err := amount.Float64Value()
+	sellAmountDec, err := numericToDecimal(amount)
 	if err != nil {
 		return nil, &ValidationError{Message: "invalid amount format"}
 	}
-	if !amountFloat.Valid || amountFloat.Float64 <= 0 {
+	if sellAmountDec.LessThanOrEqual(decimal.Zero) {
 		return nil, &ValidationError{Message: "amount must be greater than zero"}
 	}
 
@@ -276,17 +276,17 @@ func (s *TransactionService) SellTreasury(
 		return nil, ErrUnauthorized
 	}
 
-	remainingFloat, err := holding.RemainingAmount.Float64Value()
+	remainingDec, err := numericToDecimal(holding.RemainingAmount)
 	if err != nil {
 		return nil, fmt.Errorf("invalid remaining amount format: %w", err)
 	}
-	if !remainingFloat.Valid || amountFloat.Float64 > remainingFloat.Float64 {
+	if sellAmountDec.GreaterThan(remainingDec) {
 		return nil, &ValidationError{Message: fmt.Sprintf(
-			"insufficient remaining amount: requested %.2f, available %.2f",
-			amountFloat.Float64, remainingFloat.Float64)}
+			"insufficient remaining amount: requested %s, available %s",
+			sellAmountDec.StringFixed(2), remainingDec.StringFixed(2))}
 	}
 
-	totalProceeds, err := calculateSellProceeds(holding, amountFloat.Float64)
+	totalProceedsDec, err := calculateSellProceeds(holding, sellAmountDec)
 	if err != nil {
 		return nil, err
 	}
@@ -296,8 +296,9 @@ func (s *TransactionService) SellTreasury(
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		qtx := s.queries.WithTx(tx)
 
+		newRemainingDec := remainingDec.Sub(sellAmountDec)
 		newRemaining := pgtype.Numeric{}
-		if err := newRemaining.Scan(fmt.Sprintf("%.2f", remainingFloat.Float64-amountFloat.Float64)); err != nil {
+		if err := newRemaining.Scan(newRemainingDec.StringFixed(2)); err != nil {
 			return fmt.Errorf("failed to create new remaining amount: %w", err)
 		}
 
@@ -310,7 +311,7 @@ func (s *TransactionService) SellTreasury(
 		}
 
 		proceedsAmount := pgtype.Numeric{}
-		if err := proceedsAmount.Scan(fmt.Sprintf("%.2f", totalProceeds)); err != nil {
+		if err := proceedsAmount.Scan(totalProceedsDec.StringFixed(2)); err != nil {
 			return fmt.Errorf("failed to create proceeds amount: %w", err)
 		}
 
@@ -353,12 +354,12 @@ func calculatePurchasePrice(securityType string, faceValue, yieldRate decimal.De
 	}
 }
 
-func calculateSellProceeds(holding database.Holding, sellAmount float64) (float64, error) {
+func calculateSellProceeds(holding database.Holding, sellAmount decimal.Decimal) (decimal.Decimal, error) {
 	securityType := holding.SecurityType.String
 	if !holding.SecurityType.Valid || securityType == "" {
 		inferred, err := utils.GetSecurityType(holding.Term)
 		if err != nil {
-			return 0, fmt.Errorf("cannot determine security type for term %s: %w", holding.Term, err)
+			return decimal.Zero, fmt.Errorf("cannot determine security type for term %s: %w", holding.Term, err)
 		}
 		securityType = inferred
 	}
@@ -369,31 +370,28 @@ func calculateSellProceeds(holding database.Holding, sellAmount float64) (float6
 
 	daysHeld := int(time.Since(holding.PurchaseDate.Time).Hours() / 24)
 	if daysHeld < 0 {
-		return 0, errors.New("invalid holding: purchase date is in the future")
+		return decimal.Zero, errors.New("invalid holding: purchase date is in the future")
 	}
 
 	yieldRateDec, err := numericToDecimal(holding.YieldAtPurchase)
 	if err != nil {
-		return 0, fmt.Errorf("invalid yield rate for holding: %w", err)
+		return decimal.Zero, fmt.Errorf("invalid yield rate for holding: %w", err)
 	}
 
-	sellAmountDec := decimal.NewFromFloat(sellAmount)
-	maturityValue, err := utils.CalculateNoteBondMaturityValue(sellAmountDec, yieldRateDec, daysHeld)
+	maturityValue, err := utils.CalculateNoteBondMaturityValue(sellAmount, yieldRateDec, daysHeld)
 	if err != nil {
-		return 0, fmt.Errorf("failed to calculate maturity value: %w", err)
+		return decimal.Zero, fmt.Errorf("failed to calculate maturity value: %w", err)
 	}
-
-	maturityFloat, _ := maturityValue.Float64()
 
 	zap.L().Info("Selling holding",
 		zap.String("security_type", securityType),
-		zap.Float64("principal", sellAmount),
+		zap.String("principal", sellAmount.StringFixed(2)),
 		zap.String("yield", yieldRateDec.String()),
 		zap.Int("days_held", daysHeld),
-		zap.Float64("proceeds", maturityFloat),
+		zap.String("proceeds", maturityValue.StringFixed(2)),
 	)
 
-	return maturityFloat, nil
+	return maturityValue, nil
 }
 
 // numericToDecimal converts a pgtype.Numeric to decimal.Decimal.

@@ -14,12 +14,19 @@ import (
 	"github.com/go-chi/cors"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
+	"github.com/shopspring/decimal"
 	"go.uber.org/zap"
 
 	"treasury-tracker/internal/database"
 	"treasury-tracker/internal/handlers"
 	"treasury-tracker/internal/services"
 )
+
+func init() {
+	// Ensure decimal.Decimal values marshal as JSON numbers (e.g. 4.52)
+	// instead of the default quoted strings (e.g. "4.52").
+	decimal.MarshalJSONWithoutQuotes = true
+}
 
 const (
 	serverPort         = ":8080"
