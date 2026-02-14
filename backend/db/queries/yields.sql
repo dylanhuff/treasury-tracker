@@ -4,7 +4,15 @@ INSERT INTO treasury_yields (
     bc_2year, bc_5year, bc_10year, bc_30year
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9
-) ON CONFLICT (date) DO NOTHING;
+) ON CONFLICT (date) DO UPDATE SET
+    bc_1month = EXCLUDED.bc_1month,
+    bc_3month = EXCLUDED.bc_3month,
+    bc_6month = EXCLUDED.bc_6month,
+    bc_1year  = EXCLUDED.bc_1year,
+    bc_2year  = EXCLUDED.bc_2year,
+    bc_5year  = EXCLUDED.bc_5year,
+    bc_10year = EXCLUDED.bc_10year,
+    bc_30year = EXCLUDED.bc_30year;
 
 -- name: GetYieldsByDateRange :many
 SELECT * FROM treasury_yields
@@ -24,10 +32,11 @@ ORDER BY year;
 -- name: DeleteNonWeeklySamples :exec
 DELETE FROM treasury_yields outer_ty
 WHERE outer_ty.date < $1
+  AND outer_ty.date >= $2
   AND outer_ty.date NOT IN (
     SELECT DISTINCT ON (date_trunc('week', ty.date)) ty.date
     FROM treasury_yields ty
-    WHERE ty.date < $1
+    WHERE ty.date < $1 AND ty.date >= $2
     ORDER BY date_trunc('week', ty.date), ty.date DESC
   );
 

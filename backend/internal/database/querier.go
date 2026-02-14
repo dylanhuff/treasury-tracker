@@ -15,7 +15,7 @@ type Querier interface {
 	CreateTransaction(ctx context.Context, arg CreateTransactionParams) (Transaction, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
 	DeleteNonMonthlySamples(ctx context.Context, date pgtype.Date) error
-	DeleteNonWeeklySamples(ctx context.Context, date pgtype.Date) error
+	DeleteNonWeeklySamples(ctx context.Context, arg DeleteNonWeeklySamplesParams) error
 	DeleteUser(ctx context.Context, id int32) error
 	GetActiveHoldingsByUser(ctx context.Context, userID int32) ([]Holding, error)
 	GetDistinctYieldYears(ctx context.Context) ([]int32, error)

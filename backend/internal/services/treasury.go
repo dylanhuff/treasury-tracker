@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -32,6 +33,7 @@ type TreasuryService struct {
 	logger     *zap.Logger
 	sfGroup    singleflight.Group
 	ready      chan struct{} // closed when warmup completes
+	readyOnce  sync.Once
 }
 
 func NewTreasuryService(queries *database.Queries, pool *pgxpool.Pool, logger *zap.Logger) *TreasuryService {
@@ -101,7 +103,7 @@ func filterByAge(entries []models.Entry, now time.Time) []models.Entry {
 
 		if date.After(oneYearAgo) || date.Equal(oneYearAgo) {
 			daily = append(daily, entry)
-		} else if date.After(fiveYearsAgo) {
+		} else if date.After(fiveYearsAgo) || date.Equal(fiveYearsAgo) {
 			year, week := date.ISOWeek()
 			key := fmt.Sprintf("%d-W%02d", year, week)
 			if existing, ok := weeklyMap[key]; ok {
@@ -146,7 +148,7 @@ func filterByAge(entries []models.Entry, now time.Time) []models.Entry {
 // that already have data (except the current year which is always refreshed).
 // It closes the ready channel when complete to unblock background goroutines.
 func (s *TreasuryService) SyncYields(ctx context.Context) error {
-	defer close(s.ready)
+	defer s.readyOnce.Do(func() { close(s.ready) })
 
 	currentYear := time.Now().Year()
 	startYear := currentYear - 30
@@ -163,6 +165,7 @@ func (s *TreasuryService) SyncYields(ctx context.Context) error {
 	}
 
 	g := new(errgroup.Group)
+	g.SetLimit(10)
 
 	for year := startYear; year <= currentYear; year++ {
 		y := year
@@ -386,7 +389,10 @@ func (s *TreasuryService) sampleOldData(ctx context.Context) {
 	}
 
 	oneYearAgo := pgtype.Date{Time: now.AddDate(-1, 0, 0), Valid: true}
-	if err := s.queries.DeleteNonWeeklySamples(ctx, oneYearAgo); err != nil {
+	if err := s.queries.DeleteNonWeeklySamples(ctx, database.DeleteNonWeeklySamplesParams{
+		Date:   oneYearAgo,
+		Date_2: fiveYearsAgo,
+	}); err != nil {
 		s.logger.Error("weekly sampling failed", zap.Error(err))
 	} else {
 		s.logger.Info("weekly sampling complete")
