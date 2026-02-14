@@ -16,6 +16,27 @@ SELECT * FROM treasury_yields
 ORDER BY date DESC
 LIMIT 1;
 
--- name: GetMaxYieldDate :one
-SELECT COALESCE(MAX(date), '1900-01-01'::date) AS max_date
-FROM treasury_yields;
+-- name: GetDistinctYieldYears :many
+SELECT DISTINCT EXTRACT(YEAR FROM date)::int AS year
+FROM treasury_yields
+ORDER BY year;
+
+-- name: DeleteNonWeeklySamples :exec
+DELETE FROM treasury_yields outer_ty
+WHERE outer_ty.date < $1
+  AND outer_ty.date NOT IN (
+    SELECT DISTINCT ON (date_trunc('week', ty.date)) ty.date
+    FROM treasury_yields ty
+    WHERE ty.date < $1
+    ORDER BY date_trunc('week', ty.date), ty.date DESC
+  );
+
+-- name: DeleteNonMonthlySamples :exec
+DELETE FROM treasury_yields outer_ty
+WHERE outer_ty.date < $1
+  AND outer_ty.date NOT IN (
+    SELECT DISTINCT ON (date_trunc('month', ty.date)) ty.date
+    FROM treasury_yields ty
+    WHERE ty.date < $1
+    ORDER BY date_trunc('month', ty.date), ty.date DESC
+  );

@@ -86,7 +86,7 @@ type Transaction struct {
 	HoldingID pgtype.Int4 `json:"holding_id"`
 }
 
-// Daily treasury yield curve data from treasury.gov
+// Daily treasury yield curve data from treasury.gov, partitioned by year
 type TreasuryYield struct {
 	Date     pgtype.Date    `json:"date"`
 	Bc1month pgtype.Numeric `json:"bc_1month"`

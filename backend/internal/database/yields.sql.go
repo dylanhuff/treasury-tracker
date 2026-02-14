@@ -11,6 +11,64 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const deleteNonMonthlySamples = `-- name: DeleteNonMonthlySamples :exec
+DELETE FROM treasury_yields outer_ty
+WHERE outer_ty.date < $1
+  AND outer_ty.date NOT IN (
+    SELECT DISTINCT ON (date_trunc('month', ty.date)) ty.date
+    FROM treasury_yields ty
+    WHERE ty.date < $1
+    ORDER BY date_trunc('month', ty.date), ty.date DESC
+  )
+`
+
+func (q *Queries) DeleteNonMonthlySamples(ctx context.Context, date pgtype.Date) error {
+	_, err := q.db.Exec(ctx, deleteNonMonthlySamples, date)
+	return err
+}
+
+const deleteNonWeeklySamples = `-- name: DeleteNonWeeklySamples :exec
+DELETE FROM treasury_yields outer_ty
+WHERE outer_ty.date < $1
+  AND outer_ty.date NOT IN (
+    SELECT DISTINCT ON (date_trunc('week', ty.date)) ty.date
+    FROM treasury_yields ty
+    WHERE ty.date < $1
+    ORDER BY date_trunc('week', ty.date), ty.date DESC
+  )
+`
+
+func (q *Queries) DeleteNonWeeklySamples(ctx context.Context, date pgtype.Date) error {
+	_, err := q.db.Exec(ctx, deleteNonWeeklySamples, date)
+	return err
+}
+
+const getDistinctYieldYears = `-- name: GetDistinctYieldYears :many
+SELECT DISTINCT EXTRACT(YEAR FROM date)::int AS year
+FROM treasury_yields
+ORDER BY year
+`
+
+func (q *Queries) GetDistinctYieldYears(ctx context.Context) ([]int32, error) {
+	rows, err := q.db.Query(ctx, getDistinctYieldYears)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []int32{}
+	for rows.Next() {
+		var year int32
+		if err := rows.Scan(&year); err != nil {
+			return nil, err
+		}
+		items = append(items, year)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getLatestYield = `-- name: GetLatestYield :one
 SELECT date, bc_1month, bc_3month, bc_6month, bc_1year, bc_2year, bc_5year, bc_10year, bc_30year FROM treasury_yields
 ORDER BY date DESC
@@ -32,18 +90,6 @@ func (q *Queries) GetLatestYield(ctx context.Context) (TreasuryYield, error) {
 		&i.Bc30year,
 	)
 	return i, err
-}
-
-const getMaxYieldDate = `-- name: GetMaxYieldDate :one
-SELECT COALESCE(MAX(date), '1900-01-01'::date) AS max_date
-FROM treasury_yields
-`
-
-func (q *Queries) GetMaxYieldDate(ctx context.Context) (interface{}, error) {
-	row := q.db.QueryRow(ctx, getMaxYieldDate)
-	var max_date interface{}
-	err := row.Scan(&max_date)
-	return max_date, err
 }
 
 const getYieldsByDateRange = `-- name: GetYieldsByDateRange :many

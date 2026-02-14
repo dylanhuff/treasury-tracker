@@ -6,18 +6,22 @@ package database
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type Querier interface {
 	CreateHolding(ctx context.Context, arg CreateHoldingParams) (Holding, error)
 	CreateTransaction(ctx context.Context, arg CreateTransactionParams) (Transaction, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
+	DeleteNonMonthlySamples(ctx context.Context, date pgtype.Date) error
+	DeleteNonWeeklySamples(ctx context.Context, date pgtype.Date) error
 	DeleteUser(ctx context.Context, id int32) error
 	GetActiveHoldingsByUser(ctx context.Context, userID int32) ([]Holding, error)
+	GetDistinctYieldYears(ctx context.Context) ([]int32, error)
 	GetHoldingByID(ctx context.Context, id int32) (Holding, error)
 	GetHoldingsByUser(ctx context.Context, userID int32) ([]Holding, error)
 	GetLatestYield(ctx context.Context) (TreasuryYield, error)
-	GetMaxYieldDate(ctx context.Context) (interface{}, error)
 	GetTransactionByID(ctx context.Context, id int32) (Transaction, error)
 	GetTransactionsByUser(ctx context.Context, userID int32) ([]Transaction, error)
 	GetUser(ctx context.Context, id int32) (User, error)
