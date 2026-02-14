@@ -24,8 +24,6 @@ const (
 	iso8601DateLength   = 10
 )
 
-var historicalPeriods = []string{"1W", "1M", "3M", "6M", "1Y", "5Y", "10Y", "30Y"}
-
 type TreasuryService struct {
 	queries    *database.Queries
 	pool       *pgxpool.Pool
@@ -55,6 +53,12 @@ func (s *TreasuryService) SyncYields(ctx context.Context) error {
 	switch v := maxDateRaw.(type) {
 	case time.Time:
 		maxDate = v
+	case pgtype.Date:
+		if v.Valid {
+			maxDate = v.Time
+		} else {
+			maxDate = time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC)
+		}
 	default:
 		return fmt.Errorf("unexpected type for max_date: %T", maxDateRaw)
 	}
@@ -73,13 +77,19 @@ func (s *TreasuryService) SyncYields(ctx context.Context) error {
 
 	endYear := now.Year()
 
+	failures := 0
+	total := 0
 	for year := startYear; year <= endYear; year++ {
+		total++
 		if err := s.fetchAndStoreYear(ctx, year); err != nil {
-			s.logger.Error("Failed to fetch year", zap.Int("year", year), zap.Error(err))
-			// Continue with other years rather than failing entirely
+			s.logger.Error("failed to fetch year", zap.Int("year", year), zap.Error(err))
+			failures++
 		}
 	}
 
+	if failures > 0 && failures == total {
+		return fmt.Errorf("sync failed for all %d years", total)
+	}
 	return nil
 }
 

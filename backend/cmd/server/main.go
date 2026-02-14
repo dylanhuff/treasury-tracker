@@ -48,7 +48,8 @@ func main() {
 		logger.Info("No .env file found")
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		logger.Fatal("DATABASE_URL environment variable not set")
@@ -154,10 +155,11 @@ func main() {
 	<-quit
 
 	logger.Info("Shutting down server...")
-	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
+	cancel() // Stop ticker and background work
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer shutdownCancel()
 
-	if err := server.Shutdown(ctx); err != nil {
+	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Fatal("Server forced to shutdown", zap.Error(err))
 	}
 	logger.Info("Server exited")
