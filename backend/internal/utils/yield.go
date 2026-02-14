@@ -2,7 +2,8 @@ package utils
 
 import (
 	"fmt"
-	"math"
+
+	"github.com/shopspring/decimal"
 )
 
 const (
@@ -40,77 +41,85 @@ func GetSecurityType(term string) (string, error) {
 }
 
 // CalculateBillPrice uses 360-day discount convention: price = faceValue * (1 - yield*days/360)
-func CalculateBillPrice(faceValue float64, yieldRate float64, term string) (float64, error) {
+func CalculateBillPrice(faceValue, yieldRate decimal.Decimal, term string) (decimal.Decimal, error) {
 	securityType, err := GetSecurityType(term)
 	if err != nil {
-		return 0, err
+		return decimal.Zero, err
 	}
 
 	if securityType != SecurityTypeBill {
-		return 0, fmt.Errorf("CalculateBillPrice only applies to Treasury Bills (1M-1Y). For %s securities (%s), use CalculateNoteBondPrice", securityType, term)
+		return decimal.Zero, fmt.Errorf("CalculateBillPrice only applies to Treasury Bills (1M-1Y). For %s securities (%s), use CalculateNoteBondPrice", securityType, term)
 	}
 
-	if faceValue <= 0 {
-		return 0, fmt.Errorf("face value must be greater than 0, got: %f", faceValue)
+	if faceValue.LessThanOrEqual(decimal.Zero) {
+		return decimal.Zero, fmt.Errorf("face value must be greater than 0, got: %s", faceValue.String())
 	}
 
-	if yieldRate < 0 || yieldRate > 100 {
-		return 0, fmt.Errorf("yield rate must be between 0 and 100, got: %f", yieldRate)
+	if yieldRate.LessThan(decimal.Zero) || yieldRate.GreaterThan(decimal.NewFromInt(100)) {
+		return decimal.Zero, fmt.Errorf("yield rate must be between 0 and 100, got: %s", yieldRate.String())
 	}
 
 	days, err := TermDurationDays(term)
 	if err != nil {
-		return 0, err
+		return decimal.Zero, err
 	}
 
-	discountFactor := (yieldRate / 100.0 * float64(days)) / 360.0
-	price := faceValue * (1.0 - discountFactor)
-	price = math.Round(price*100) / 100
+	hundred := decimal.NewFromInt(100)
+	threeSixty := decimal.NewFromInt(360)
+	daysDecimal := decimal.NewFromInt(int64(days))
+
+	discountFactor := yieldRate.Div(hundred).Mul(daysDecimal).Div(threeSixty)
+	price := faceValue.Mul(decimal.NewFromInt(1).Sub(discountFactor))
+	price = price.Round(2)
 
 	return price, nil
 }
 
-func CalculateBillDiscount(faceValue float64, purchasePrice float64) float64 {
-	discount := faceValue - purchasePrice
-	return math.Round(discount*100) / 100
+func CalculateBillDiscount(faceValue, purchasePrice decimal.Decimal) decimal.Decimal {
+	discount := faceValue.Sub(purchasePrice)
+	return discount.Round(2)
 }
 
 // CalculateNoteBondPrice returns par value (Notes/Bonds trade at face value).
-func CalculateNoteBondPrice(faceValue float64, yieldRate float64, term string) (float64, error) {
-	if faceValue <= 0 {
-		return 0, fmt.Errorf("face value must be greater than 0, got: %f", faceValue)
+func CalculateNoteBondPrice(faceValue, yieldRate decimal.Decimal, term string) (decimal.Decimal, error) {
+	if faceValue.LessThanOrEqual(decimal.Zero) {
+		return decimal.Zero, fmt.Errorf("face value must be greater than 0, got: %s", faceValue.String())
 	}
 
-	if yieldRate < 0 || yieldRate > 100 {
-		return 0, fmt.Errorf("yield rate must be between 0 and 100, got: %f", yieldRate)
+	if yieldRate.LessThan(decimal.Zero) || yieldRate.GreaterThan(decimal.NewFromInt(100)) {
+		return decimal.Zero, fmt.Errorf("yield rate must be between 0 and 100, got: %s", yieldRate.String())
 	}
 
 	securityType, err := GetSecurityType(term)
 	if err != nil {
-		return 0, err
+		return decimal.Zero, err
 	}
 	if securityType != SecurityTypeNote && securityType != SecurityTypeBond {
-		return 0, fmt.Errorf("invalid Note/Bond term: %s (must be 2Y, 5Y, 10Y, or 30Y)", term)
+		return decimal.Zero, fmt.Errorf("invalid Note/Bond term: %s (must be 2Y, 5Y, 10Y, or 30Y)", term)
 	}
 
-	return math.Round(faceValue*100) / 100, nil
+	return faceValue.Round(2), nil
 }
 
 // CalculateNoteBondMaturityValue returns principal + simple interest (365-day convention).
-func CalculateNoteBondMaturityValue(principal float64, yieldRate float64, daysHeld int) (float64, error) {
-	if principal <= 0 {
-		return 0, fmt.Errorf("principal must be greater than 0, got: %f", principal)
+func CalculateNoteBondMaturityValue(principal, yieldRate decimal.Decimal, daysHeld int) (decimal.Decimal, error) {
+	if principal.LessThanOrEqual(decimal.Zero) {
+		return decimal.Zero, fmt.Errorf("principal must be greater than 0, got: %s", principal.String())
 	}
 
-	if yieldRate < 0 || yieldRate > 100 {
-		return 0, fmt.Errorf("yield rate must be between 0 and 100, got: %f", yieldRate)
+	if yieldRate.LessThan(decimal.Zero) || yieldRate.GreaterThan(decimal.NewFromInt(100)) {
+		return decimal.Zero, fmt.Errorf("yield rate must be between 0 and 100, got: %s", yieldRate.String())
 	}
 
 	if daysHeld < 0 {
-		return 0, fmt.Errorf("days held must be non-negative, got: %d", daysHeld)
+		return decimal.Zero, fmt.Errorf("days held must be non-negative, got: %d", daysHeld)
 	}
 
-	simpleInterest := principal * (yieldRate / 100.0) * (float64(daysHeld) / 365.0)
-	maturityValue := principal + simpleInterest
-	return math.Round(maturityValue*100) / 100, nil
+	hundred := decimal.NewFromInt(100)
+	threeSixtyFive := decimal.NewFromInt(365)
+	daysDecimal := decimal.NewFromInt(int64(daysHeld))
+
+	simpleInterest := principal.Mul(yieldRate.Div(hundred)).Mul(daysDecimal.Div(threeSixtyFive))
+	maturityValue := principal.Add(simpleInterest)
+	return maturityValue.Round(2), nil
 }

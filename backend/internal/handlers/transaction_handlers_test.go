@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
+	"go.uber.org/zap"
 	"treasury-tracker/internal/database"
 	"treasury-tracker/internal/services"
 	"treasury-tracker/internal/testutil"
@@ -25,10 +27,11 @@ func setupTestHandler(t *testing.T) (*TransactionHandlers, *database.Queries, fu
 		t.Skipf("Skipping integration test: database not available: %v", err)
 	}
 
+	logger := zap.NewNop()
 	queries := database.New(pool)
-	txService := services.NewTransactionService(queries, pool)
-	treasuryService := services.NewTreasuryService()
-	handler := NewTransactionHandlers(txService, queries, treasuryService)
+	txService := services.NewTransactionService(queries, pool, logger)
+	treasuryService := services.NewTreasuryService(queries, pool, logger)
+	handler := NewTransactionHandlers(txService, queries, treasuryService, logger)
 
 	return handler, queries, func() { pool.Close() }
 }
@@ -211,4 +214,146 @@ func TestBuyHandler_AllValidTerms(t *testing.T) {
 		t.Error("Expected at least some transactions")
 	}
 	t.Logf("Created %d transactions", len(transactions))
+}
+
+// ---------------------------------------------------------------------------
+// Mock-based unit tests (no database required)
+// ---------------------------------------------------------------------------
+
+func TestFundHandler_Success_Mock(t *testing.T) {
+	user := sampleUser()
+	txMock := &mockTransactionService{fundResult: user}
+	handler := NewTransactionHandlers(txMock, nil, nil, zap.NewNop())
+
+	fundReq := TransactionRequest{UserID: 1, Amount: 5000.00}
+	body, _ := json.Marshal(fundReq)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/fund", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	handler.FundHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp TransactionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+	if !resp.Success {
+		t.Error("Expected success=true")
+	}
+	if resp.User == nil {
+		t.Error("Expected user in response")
+	}
+	if resp.User.ID != 1 {
+		t.Errorf("Expected user ID 1, got %d", resp.User.ID)
+	}
+}
+
+func TestFundHandler_InvalidJSON_Mock(t *testing.T) {
+	handler := NewTransactionHandlers(nil, nil, nil, zap.NewNop())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/fund", bytes.NewReader([]byte(`not json`)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	handler.FundHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("Expected status 400, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp errorResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("Failed to decode error response: %v", err)
+	}
+	if resp.Error == "" {
+		t.Error("Expected non-empty error message")
+	}
+}
+
+func TestBuyHandler_Success_Mock(t *testing.T) {
+	user := sampleUser()
+	treasuryMock := &mockTreasuryService{
+		latestYields: sampleYieldData(),
+	}
+	txMock := &mockTransactionService{
+		buyResult: &services.PurchaseResult{
+			User:          user,
+			FaceValue:     decimal.NewFromFloat(50000.00),
+			PurchasePrice: decimal.NewFromFloat(48912.50),
+			Discount:      decimal.NewFromFloat(1087.50),
+		},
+	}
+	handler := NewTransactionHandlers(txMock, nil, treasuryMock, zap.NewNop())
+
+	buyReq := BuyRequest{
+		UserID:    1,
+		Term:      "6M",
+		FaceValue: 50000.00,
+	}
+	body, _ := json.Marshal(buyReq)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/buy", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	handler.BuyHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp BuyResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+	if !resp.Success {
+		t.Error("Expected success=true")
+	}
+	if resp.User == nil {
+		t.Error("Expected user in response")
+	}
+	if !resp.FaceValue.Equal(decimal.NewFromFloat(50000.00)) {
+		t.Errorf("Expected face value 50000.00, got %s", resp.FaceValue)
+	}
+	if !resp.PurchasePrice.Equal(decimal.NewFromFloat(48912.50)) {
+		t.Errorf("Expected purchase price 48912.50, got %s", resp.PurchasePrice)
+	}
+	if !resp.Discount.Equal(decimal.NewFromFloat(1087.50)) {
+		t.Errorf("Expected discount 1087.50, got %s", resp.Discount)
+	}
+}
+
+func TestBuyHandler_InvalidTerm_Mock(t *testing.T) {
+	// No services needed -- handler should reject before calling any service
+	handler := NewTransactionHandlers(nil, nil, nil, zap.NewNop())
+
+	buyReq := BuyRequest{
+		UserID:    1,
+		Term:      "INVALID",
+		FaceValue: 50000.00,
+	}
+	body, _ := json.Marshal(buyReq)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/buy", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	handler.BuyHandler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("Expected status 400, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp errorResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("Failed to decode error response: %v", err)
+	}
+	if resp.Error == "" {
+		t.Error("Expected non-empty error message for invalid term")
+	}
 }

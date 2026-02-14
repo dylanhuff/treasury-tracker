@@ -1,20 +1,21 @@
 package handlers
 
 import (
-	"log"
 	"net/http"
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
+	"go.uber.org/zap"
 	"treasury-tracker/internal/database"
 )
 
 type HoldingsHandlers struct {
-	queries *database.Queries
+	queries database.Querier
+	logger  *zap.Logger
 }
 
-func NewHoldingsHandlers(queries *database.Queries) *HoldingsHandlers {
-	return &HoldingsHandlers{queries: queries}
+func NewHoldingsHandlers(queries database.Querier, logger *zap.Logger) *HoldingsHandlers {
+	return &HoldingsHandlers{queries: queries, logger: logger}
 }
 
 func (h *HoldingsHandlers) GetUserHoldings(w http.ResponseWriter, r *http.Request) {
@@ -27,7 +28,7 @@ func (h *HoldingsHandlers) GetUserHoldings(w http.ResponseWriter, r *http.Reques
 
 	holdings, err := h.queries.GetActiveHoldingsByUser(r.Context(), int32(userID))
 	if err != nil {
-		log.Printf("Error fetching holdings for user %d: %v", userID, err)
+		h.logger.Error("Error fetching holdings", zap.Int64("user_id", userID), zap.Error(err))
 		respondWithError(w, http.StatusInternalServerError, "failed to fetch holdings")
 		return
 	}

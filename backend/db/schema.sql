@@ -62,3 +62,18 @@ COMMENT ON COLUMN holdings.security_type IS 'Type of treasury security: bill, no
 COMMENT ON COLUMN holdings.face_value IS 'Amount received at maturity';
 COMMENT ON COLUMN holdings.purchase_price IS 'Actual price paid (discounted for T-Bills)';
 COMMENT ON COLUMN transactions.holding_id IS 'References the holding for buy/sell transactions';
+
+CREATE TABLE treasury_yields (
+    date DATE NOT NULL,
+    bc_1month NUMERIC(6, 3),
+    bc_3month NUMERIC(6, 3),
+    bc_6month NUMERIC(6, 3),
+    bc_1year  NUMERIC(6, 3),
+    bc_2year  NUMERIC(6, 3),
+    bc_5year  NUMERIC(6, 3),
+    bc_10year NUMERIC(6, 3),
+    bc_30year NUMERIC(6, 3),
+    PRIMARY KEY (date)
+) PARTITION BY RANGE (date);
+
+COMMENT ON TABLE treasury_yields IS 'Daily treasury yield curve data from treasury.gov, partitioned by year';

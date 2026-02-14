@@ -4,32 +4,36 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/shopspring/decimal"
+	"go.uber.org/zap"
 	"treasury-tracker/internal/database"
 	"treasury-tracker/internal/models"
 	"treasury-tracker/internal/services"
 )
 
 type TransactionHandlers struct {
-	txService       *services.TransactionService
-	queries         *database.Queries
-	treasuryService *services.TreasuryService
+	txService       services.TransactionServiceInterface
+	queries         database.Querier
+	treasuryService services.TreasuryServiceInterface
+	logger          *zap.Logger
 }
 
 func NewTransactionHandlers(
-	txService *services.TransactionService,
-	queries *database.Queries,
-	treasuryService *services.TreasuryService,
+	txService services.TransactionServiceInterface,
+	queries database.Querier,
+	treasuryService services.TreasuryServiceInterface,
+	logger *zap.Logger,
 ) *TransactionHandlers {
 	return &TransactionHandlers{
 		txService:       txService,
 		queries:         queries,
 		treasuryService: treasuryService,
+		logger:          logger,
 	}
 }
 
@@ -57,11 +61,11 @@ type TransactionResponse struct {
 }
 
 type BuyResponse struct {
-	Success       bool           `json:"success"`
-	User          *database.User `json:"user"`
-	FaceValue     float64        `json:"face_value"`
-	PurchasePrice float64        `json:"purchase_price"`
-	Discount      float64        `json:"discount"`
+	Success       bool            `json:"success"`
+	User          *database.User  `json:"user"`
+	FaceValue     decimal.Decimal `json:"face_value"`
+	PurchasePrice decimal.Decimal `json:"purchase_price"`
+	Discount      decimal.Decimal `json:"discount"`
 }
 
 var validTerms = map[string]bool{
@@ -84,7 +88,7 @@ func (h *TransactionHandlers) FundHandler(w http.ResponseWriter, r *http.Request
 
 	user, err := h.txService.FundAccount(r.Context(), req.UserID, amount)
 	if err != nil {
-		log.Printf("Error funding account for user %d: %v", req.UserID, err)
+		h.logger.Error("Error funding account", zap.Int32("user_id", req.UserID), zap.Error(err))
 		respondWithServiceError(w, err)
 		return
 	}
@@ -107,7 +111,7 @@ func (h *TransactionHandlers) WithdrawHandler(w http.ResponseWriter, r *http.Req
 
 	user, err := h.txService.WithdrawAccount(r.Context(), req.UserID, amount)
 	if err != nil {
-		log.Printf("Error withdrawing from account for user %d: %v", req.UserID, err)
+		h.logger.Error("Error withdrawing from account", zap.Int32("user_id", req.UserID), zap.Error(err))
 		respondWithServiceError(w, err)
 		return
 	}
@@ -125,7 +129,7 @@ func (h *TransactionHandlers) GetUserTransactions(w http.ResponseWriter, r *http
 
 	transactions, err := h.queries.GetTransactionsByUser(r.Context(), int32(userID))
 	if err != nil {
-		log.Printf("Error fetching transactions for user %d: %v", userID, err)
+		h.logger.Error("Error fetching transactions", zap.Int64("user_id", userID), zap.Error(err))
 		respondWithError(w, http.StatusInternalServerError, "failed to fetch transactions")
 		return
 	}
@@ -145,9 +149,9 @@ func (h *TransactionHandlers) BuyHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	yieldData, err := h.treasuryService.GetLatestYields()
+	yieldData, err := h.treasuryService.GetLatestYields(r.Context())
 	if err != nil {
-		log.Printf("Error fetching yield data: %v", err)
+		h.logger.Error("Error fetching yield data", zap.Error(err))
 		respondWithError(w, http.StatusInternalServerError, "failed to fetch current yield data")
 		return
 	}
@@ -165,14 +169,14 @@ func (h *TransactionHandlers) BuyHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	currentYield := pgtype.Numeric{}
-	if err := currentYield.Scan(fmt.Sprintf("%.2f", yieldRate)); err != nil {
+	if err := currentYield.Scan(yieldRate.StringFixed(2)); err != nil {
 		respondWithError(w, http.StatusInternalServerError, "invalid yield format")
 		return
 	}
 
 	result, err := h.txService.BuyTreasury(r.Context(), req.UserID, req.Term, faceValueNumeric, currentYield)
 	if err != nil {
-		log.Printf("Error executing buy for user %d: %v", req.UserID, err)
+		h.logger.Error("Error executing buy", zap.Int32("user_id", req.UserID), zap.Error(err))
 		switch {
 		case errors.Is(err, services.ErrInsufficientBalance):
 			respondWithError(w, http.StatusBadRequest, err.Error())
@@ -204,9 +208,9 @@ func (h *TransactionHandlers) SellHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	yieldData, err := h.treasuryService.GetLatestYields()
+	yieldData, err := h.treasuryService.GetLatestYields(r.Context())
 	if err != nil {
-		log.Printf("Error fetching yield data for sell: %v", err)
+		h.logger.Error("Error fetching yield data for sell", zap.Error(err))
 		respondWithError(w, http.StatusInternalServerError, "failed to fetch current yield data")
 		return
 	}
@@ -224,14 +228,14 @@ func (h *TransactionHandlers) SellHandler(w http.ResponseWriter, r *http.Request
 	}
 
 	currentYield := pgtype.Numeric{}
-	if err := currentYield.Scan(fmt.Sprintf("%.2f", yieldRate)); err != nil {
+	if err := currentYield.Scan(yieldRate.StringFixed(2)); err != nil {
 		respondWithError(w, http.StatusInternalServerError, "invalid yield format")
 		return
 	}
 
 	user, err := h.txService.SellTreasury(r.Context(), req.UserID, holding, amount, currentYield)
 	if err != nil {
-		log.Printf("Error executing sell for user %d: %v", req.UserID, err)
+		h.logger.Error("Error executing sell", zap.Int32("user_id", req.UserID), zap.Error(err))
 		respondWithServiceError(w, err)
 		return
 	}
@@ -239,11 +243,11 @@ func (h *TransactionHandlers) SellHandler(w http.ResponseWriter, r *http.Request
 	respondWithJSON(w, http.StatusOK, TransactionResponse{Success: true, User: user})
 }
 
-func findYieldRate(yields []models.YieldPoint, term string) (float64, bool) {
+func findYieldRate(yields []models.YieldPoint, term string) (decimal.Decimal, bool) {
 	for _, y := range yields {
 		if y.Term == term {
 			return y.Rate, true
 		}
 	}
-	return 0, false
+	return decimal.Zero, false
 }

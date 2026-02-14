@@ -1,51 +1,397 @@
 package services
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
-	"sort"
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
+	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
+
+	"treasury-tracker/internal/database"
 	"treasury-tracker/internal/models"
 )
 
 const (
-	treasuryURLTemplate  = "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml?data=daily_treasury_yield_curve&field_tdr_date_value=%d"
-	httpTimeout = 30 * time.Second
-	cacheDuration        = 1 * time.Hour
-	iso8601DateLength    = 10
+	treasuryURLTemplate = "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml?data=daily_treasury_yield_curve&field_tdr_date_value=%d"
+	httpTimeout         = 30 * time.Second
+	iso8601DateLength   = 10
 )
 
-type historicalCacheEntry struct {
-	data      *models.HistoricalYieldData
-	timestamp time.Time
-}
-
 type TreasuryService struct {
-	cacheData      *models.YieldData
-	cacheTimestamp time.Time
-	cacheDuration  time.Duration
-	mu             sync.RWMutex
-	httpClient     *http.Client
-
-	historicalCache map[string]*historicalCacheEntry
-	historicalMu    sync.RWMutex
+	queries    *database.Queries
+	pool       *pgxpool.Pool
+	httpClient *http.Client
+	logger     *zap.Logger
+	sfGroup    singleflight.Group
+	ready      chan struct{} // closed when warmup completes
+	readyOnce  sync.Once
 }
 
-var historicalPeriods = []string{"1W", "1M", "3M", "6M", "1Y", "5Y", "10Y", "30Y"}
-
-func NewTreasuryService() *TreasuryService {
+func NewTreasuryService(queries *database.Queries, pool *pgxpool.Pool, logger *zap.Logger) *TreasuryService {
 	return &TreasuryService{
-		cacheDuration: cacheDuration,
-		httpClient: &http.Client{
-			Timeout: httpTimeout,
-		},
-		historicalCache: make(map[string]*historicalCacheEntry),
+		queries:    queries,
+		pool:       pool,
+		httpClient: &http.Client{Timeout: httpTimeout},
+		logger:     logger,
+		ready:      make(chan struct{}),
 	}
+}
+
+func (s *TreasuryService) ensurePartitionExists(ctx context.Context, year int) error {
+	query := fmt.Sprintf(
+		`CREATE TABLE IF NOT EXISTS treasury_yields_%d PARTITION OF treasury_yields FOR VALUES FROM ('%d-01-01') TO ('%d-01-01')`,
+		year, year, year+1,
+	)
+	_, err := s.pool.Exec(ctx, query)
+	if err != nil {
+		return fmt.Errorf("ensure partition for year %d: %w", year, err)
+	}
+	return nil
+}
+
+func (s *TreasuryService) maybeCreateNextYearPartition(ctx context.Context) {
+	now := time.Now()
+	nextYear := now.Year() + 1
+	nextJan1 := time.Date(nextYear, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	if nextJan1.Sub(now) <= 30*24*time.Hour {
+		if err := s.ensurePartitionExists(ctx, nextYear); err != nil {
+			s.logger.Error("failed to create next year partition", zap.Int("year", nextYear), zap.Error(err))
+		} else {
+			s.logger.Info("ensured next year partition exists", zap.Int("year", nextYear))
+		}
+	}
+}
+
+// Sampling rules: <=1Y daily, 1-5Y weekly, >5Y monthly.
+func filterByAge(entries []models.Entry, now time.Time) []models.Entry {
+	if len(entries) == 0 {
+		return entries
+	}
+
+	oneYearAgo := now.AddDate(-1, 0, 0)
+	fiveYearsAgo := now.AddDate(-5, 0, 0)
+
+	var daily []models.Entry
+	weeklyMap := make(map[string]models.Entry)
+	monthlyMap := make(map[string]models.Entry)
+
+	for _, entry := range entries {
+		dateStr := entry.Date
+		if len(dateStr) > iso8601DateLength {
+			dateStr = dateStr[:iso8601DateLength]
+		}
+		date, err := time.Parse("2006-01-02", dateStr)
+		if err != nil {
+			continue
+		}
+
+		if date.After(oneYearAgo) || date.Equal(oneYearAgo) {
+			daily = append(daily, entry)
+		} else if date.After(fiveYearsAgo) || date.Equal(fiveYearsAgo) {
+			year, week := date.ISOWeek()
+			key := fmt.Sprintf("%d-W%02d", year, week)
+			if existing, ok := weeklyMap[key]; ok {
+				existDate := existing.Date
+				if len(existDate) > iso8601DateLength {
+					existDate = existDate[:iso8601DateLength]
+				}
+				if dateStr > existDate {
+					weeklyMap[key] = entry
+				}
+			} else {
+				weeklyMap[key] = entry
+			}
+		} else {
+			key := date.Format("2006-01")
+			if existing, ok := monthlyMap[key]; ok {
+				existDate := existing.Date
+				if len(existDate) > iso8601DateLength {
+					existDate = existDate[:iso8601DateLength]
+				}
+				if dateStr > existDate {
+					monthlyMap[key] = entry
+				}
+			} else {
+				monthlyMap[key] = entry
+			}
+		}
+	}
+
+	result := make([]models.Entry, 0, len(daily)+len(weeklyMap)+len(monthlyMap))
+	result = append(result, daily...)
+	for _, e := range weeklyMap {
+		result = append(result, e)
+	}
+	for _, e := range monthlyMap {
+		result = append(result, e)
+	}
+	return result
+}
+
+func (s *TreasuryService) SyncYields(ctx context.Context) error {
+	defer s.readyOnce.Do(func() { close(s.ready) })
+
+	currentYear := time.Now().Year()
+	startYear := currentYear - 30
+
+	existingYears, err := s.queries.GetDistinctYieldYears(ctx)
+	if err != nil {
+		s.logger.Warn("failed to get existing years, will fetch all", zap.Error(err))
+		existingYears = nil
+	}
+
+	existing := make(map[int32]bool, len(existingYears))
+	for _, y := range existingYears {
+		existing[y] = true
+	}
+
+	g := new(errgroup.Group)
+	g.SetLimit(10)
+
+	for year := startYear; year <= currentYear; year++ {
+		y := year
+		if y != currentYear && existing[int32(y)] {
+			s.logger.Debug("skipping year with existing data", zap.Int("year", y))
+			continue
+		}
+
+		g.Go(func() error {
+			if err := s.ensurePartitionExists(ctx, y); err != nil {
+				s.logger.Error("failed to create partition", zap.Int("year", y), zap.Error(err))
+				return nil // don't fail other goroutines
+			}
+			if err := s.fetchAndStoreYear(ctx, y); err != nil {
+				s.logger.Error("failed to fetch year", zap.Int("year", y), zap.Error(err))
+				return nil // don't fail other goroutines
+			}
+			return nil
+		})
+	}
+
+	g.Wait()
+	return nil
+}
+
+// Wrapped in singleflight to deduplicate concurrent fetches of the same year.
+func (s *TreasuryService) fetchAndStoreYear(ctx context.Context, year int) error {
+	key := fmt.Sprintf("fetch_year_%d", year)
+
+	_, err, _ := s.sfGroup.Do(key, func() (interface{}, error) {
+		s.logger.Info("Fetching treasury data for year", zap.Int("year", year))
+
+		url := fmt.Sprintf(treasuryURLTemplate, year)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return nil, fmt.Errorf("create request for year %d: %w", year, err)
+		}
+
+		resp, err := s.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("fetch year %d: %w", year, err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("treasury API returned %d for year %d", resp.StatusCode, year)
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("read body year %d: %w", year, err)
+		}
+
+		var feed models.TreasuryFeed
+		if err := xml.Unmarshal(body, &feed); err != nil {
+			return nil, fmt.Errorf("parse XML year %d: %w", year, err)
+		}
+
+		filtered := filterByAge(feed.Entries, time.Now())
+		s.logger.Info("Parsed and filtered entries for year",
+			zap.Int("year", year),
+			zap.Int("raw", len(feed.Entries)),
+			zap.Int("filtered", len(filtered)),
+		)
+
+		for _, entry := range filtered {
+			dateStr := entry.Date
+			if len(dateStr) > iso8601DateLength {
+				dateStr = dateStr[:iso8601DateLength]
+			}
+
+			parsed, err := time.Parse("2006-01-02", dateStr)
+			if err != nil {
+				s.logger.Warn("Skipping entry with bad date", zap.String("date", dateStr), zap.Error(err))
+				continue
+			}
+
+			params := database.UpsertTreasuryYieldParams{
+				Date:     pgtype.Date{Time: parsed, Valid: true},
+				Bc1month: numericFromFloat(entry.BC1Month),
+				Bc3month: numericFromFloat(entry.BC3Month),
+				Bc6month: numericFromFloat(entry.BC6Month),
+				Bc1year:  numericFromFloat(entry.BC1Year),
+				Bc2year:  numericFromFloat(entry.BC2Year),
+				Bc5year:  numericFromFloat(entry.BC5Year),
+				Bc10year: numericFromFloat(entry.BC10Year),
+				Bc30year: numericFromFloat(entry.BC30Year),
+			}
+
+			if err := s.queries.UpsertTreasuryYield(ctx, params); err != nil {
+				s.logger.Warn("Failed to upsert yield", zap.String("date", dateStr), zap.Error(err))
+			}
+		}
+
+		return nil, nil
+	})
+
+	return err
+}
+
+// No query-time sampling needed; data is pre-sampled at insertion and by the weekly sampler.
+func (s *TreasuryService) GetHistoricalYields(ctx context.Context, period string) (*models.HistoricalYieldData, error) {
+	startDate, endDate, err := calculateDateRange(period)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := s.queries.GetYieldsByDateRange(ctx, database.GetYieldsByDateRangeParams{
+		Date:   pgtype.Date{Time: startDate, Valid: true},
+		Date_2: pgtype.Date{Time: endDate, Valid: true},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query yields by date range: %w", err)
+	}
+
+	dataPoints := make([]models.YieldDataPoint, 0, len(rows))
+	for _, row := range rows {
+		dataPoints = append(dataPoints, models.YieldDataPoint{
+			Date:     row.Date.Time.Format("2006-01-02"),
+			Yield2Y:  numericToDecimalSafe(row.Bc2year),
+			Yield5Y:  numericToDecimalSafe(row.Bc5year),
+			Yield10Y: numericToDecimalSafe(row.Bc10year),
+		})
+	}
+
+	return &models.HistoricalYieldData{
+		Period:    period,
+		StartDate: startDate.Format("2006-01-02"),
+		EndDate:   endDate.Format("2006-01-02"),
+		Terms:     []string{"10Y", "5Y", "2Y"},
+		Data:      dataPoints,
+	}, nil
+}
+
+func (s *TreasuryService) GetLatestYields(ctx context.Context) (*models.YieldData, error) {
+	row, err := s.queries.GetLatestYield(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get latest yield: %w", err)
+	}
+
+	return &models.YieldData{
+		Date: row.Date.Time.Format("2006-01-02"),
+		Yields: []models.YieldPoint{
+			{Term: "1M", Rate: numericToDecimalSafe(row.Bc1month)},
+			{Term: "3M", Rate: numericToDecimalSafe(row.Bc3month)},
+			{Term: "6M", Rate: numericToDecimalSafe(row.Bc6month)},
+			{Term: "1Y", Rate: numericToDecimalSafe(row.Bc1year)},
+			{Term: "2Y", Rate: numericToDecimalSafe(row.Bc2year)},
+			{Term: "5Y", Rate: numericToDecimalSafe(row.Bc5year)},
+			{Term: "10Y", Rate: numericToDecimalSafe(row.Bc10year)},
+			{Term: "30Y", Rate: numericToDecimalSafe(row.Bc30year)},
+		},
+	}, nil
+}
+
+func (s *TreasuryService) StartRefreshTicker(ctx context.Context) {
+	go func() {
+		<-s.ready
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				s.logger.Info("Refresh ticker stopped")
+				return
+			case <-ticker.C:
+				s.logger.Info("Hourly refresh: fetching current year data")
+				currentYear := time.Now().Year()
+				if err := s.ensurePartitionExists(ctx, currentYear); err != nil {
+					s.logger.Error("failed to ensure current year partition", zap.Int("year", currentYear), zap.Error(err))
+				}
+				if err := s.fetchAndStoreYear(ctx, currentYear); err != nil {
+					s.logger.Error("Hourly refresh failed", zap.Error(err))
+				}
+				s.maybeCreateNextYearPartition(ctx)
+			}
+		}
+	}()
+}
+
+func (s *TreasuryService) StartWeeklySampler(ctx context.Context) {
+	go func() {
+		<-s.ready
+		ticker := time.NewTicker(7 * 24 * time.Hour)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				s.logger.Info("Weekly sampler stopped")
+				return
+			case <-ticker.C:
+				s.logger.Info("Weekly sampler: thinning old data")
+				s.sampleOldData(ctx)
+			}
+		}
+	}()
+}
+
+// Thins old data: >5Y keep monthly, >1Y keep weekly.
+func (s *TreasuryService) sampleOldData(ctx context.Context) {
+	now := time.Now()
+
+	fiveYearsAgo := pgtype.Date{Time: now.AddDate(-5, 0, 0), Valid: true}
+	if err := s.queries.DeleteNonMonthlySamples(ctx, fiveYearsAgo); err != nil {
+		s.logger.Error("monthly sampling failed", zap.Error(err))
+	} else {
+		s.logger.Info("monthly sampling complete")
+	}
+
+	oneYearAgo := pgtype.Date{Time: now.AddDate(-1, 0, 0), Valid: true}
+	if err := s.queries.DeleteNonWeeklySamples(ctx, database.DeleteNonWeeklySamplesParams{
+		Date:   oneYearAgo,
+		Date_2: fiveYearsAgo,
+	}); err != nil {
+		s.logger.Error("weekly sampling failed", zap.Error(err))
+	} else {
+		s.logger.Info("weekly sampling complete")
+	}
+}
+
+func numericFromFloat(f float64) pgtype.Numeric {
+	var n pgtype.Numeric
+	if err := n.Scan(fmt.Sprintf("%.3f", f)); err != nil {
+		zap.L().Error("failed to scan numeric from float", zap.Float64("value", f), zap.Error(err))
+	}
+	return n
+}
+
+func numericToDecimalSafe(n pgtype.Numeric) decimal.Decimal {
+	if !n.Valid || n.NaN || n.Int == nil {
+		return decimal.Zero
+	}
+	return decimal.NewFromBigInt(n.Int, n.Exp)
 }
 
 func calculateDateRange(period string) (startDate, endDate time.Time, err error) {
@@ -73,324 +419,4 @@ func calculateDateRange(period string) (startDate, endDate time.Time, err error)
 	}
 
 	return startDate, endDate, nil
-}
-
-func (s *TreasuryService) fetchFromAPI() (*models.TreasuryFeed, error) {
-	url := fmt.Sprintf(treasuryURLTemplate, time.Now().Year())
-	resp, err := s.httpClient.Get(url)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch treasury data: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("treasury API returned status %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	var feed models.TreasuryFeed
-	if err := xml.Unmarshal(body, &feed); err != nil {
-		return nil, fmt.Errorf("failed to parse XML: %w", err)
-	}
-
-	if len(feed.Entries) == 0 {
-		return nil, fmt.Errorf("no entries found in treasury feed")
-	}
-
-	return &feed, nil
-}
-
-func (s *TreasuryService) fetchFromAPIForYears(startYear, endYear int) (*models.TreasuryFeed, error) {
-	yearCount := endYear - startYear + 1
-
-	type yearResult struct {
-		year    int
-		entries []models.Entry
-		err     error
-	}
-	results := make(chan yearResult, yearCount)
-
-	for year := startYear; year <= endYear; year++ {
-		go func(y int) {
-			url := fmt.Sprintf(treasuryURLTemplate, y)
-			resp, err := s.httpClient.Get(url)
-			if err != nil {
-				results <- yearResult{year: y, err: fmt.Errorf("fetch year %d: %w", y, err)}
-				return
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode != http.StatusOK {
-				results <- yearResult{year: y, err: fmt.Errorf("treasury API returned %d for year %d", resp.StatusCode, y)}
-				return
-			}
-
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				results <- yearResult{year: y, err: fmt.Errorf("read body year %d: %w", y, err)}
-				return
-			}
-
-			var feed models.TreasuryFeed
-			if err := xml.Unmarshal(body, &feed); err != nil {
-				results <- yearResult{year: y, err: fmt.Errorf("parse XML year %d: %w", y, err)}
-				return
-			}
-
-			results <- yearResult{year: y, entries: feed.Entries}
-		}(year)
-	}
-
-	yearData := make(map[int][]models.Entry)
-	var fetchErrors []error
-
-	for i := 0; i < yearCount; i++ {
-		result := <-results
-		if result.err != nil {
-			fetchErrors = append(fetchErrors, result.err)
-		} else {
-			yearData[result.year] = result.entries
-		}
-	}
-
-	if len(fetchErrors) > 0 {
-		return nil, fetchErrors[0]
-	}
-
-	var combinedFeed models.TreasuryFeed
-	for year := startYear; year <= endYear; year++ {
-		combinedFeed.Entries = append(combinedFeed.Entries, yearData[year]...)
-	}
-
-	if len(combinedFeed.Entries) == 0 {
-		return nil, fmt.Errorf("no entries found for years %d-%d", startYear, endYear)
-	}
-
-	return &combinedFeed, nil
-}
-
-func (s *TreasuryService) convertToYieldData(feed *models.TreasuryFeed) (*models.YieldData, error) {
-	if len(feed.Entries) == 0 {
-		return nil, fmt.Errorf("no entries to convert")
-	}
-
-	entry := feed.Entries[len(feed.Entries)-1]
-
-	date := entry.Date
-	if len(date) > iso8601DateLength {
-		date = date[:iso8601DateLength]
-	}
-
-	return &models.YieldData{
-		Date: date,
-		Yields: []models.YieldPoint{
-			{Term: "1M", Rate: entry.BC1Month},
-			{Term: "3M", Rate: entry.BC3Month},
-			{Term: "6M", Rate: entry.BC6Month},
-			{Term: "1Y", Rate: entry.BC1Year},
-			{Term: "2Y", Rate: entry.BC2Year},
-			{Term: "5Y", Rate: entry.BC5Year},
-			{Term: "10Y", Rate: entry.BC10Year},
-			{Term: "30Y", Rate: entry.BC30Year},
-		},
-	}, nil
-}
-
-// sampleDataPoints reduces density for long periods (30Y: monthly, 10Y/5Y: weekly).
-func sampleDataPoints(dataPoints []models.YieldDataPoint, period string) []models.YieldDataPoint {
-	switch period {
-	case "1W", "1M", "3M", "6M", "1Y":
-		return dataPoints
-	}
-
-	if len(dataPoints) == 0 {
-		return dataPoints
-	}
-
-	var samplingInterval int
-	switch period {
-	case "30Y":
-		samplingInterval = 30
-	case "10Y", "5Y":
-		samplingInterval = 7
-	default:
-		return dataPoints
-	}
-
-	intervalMap := make(map[string]models.YieldDataPoint)
-
-	for _, point := range dataPoints {
-		date, err := time.Parse("2006-01-02", point.Date)
-		if err != nil {
-			continue
-		}
-
-		var intervalKey string
-		if samplingInterval == 30 {
-			intervalKey = date.Format("2006-01")
-		} else {
-			year, week := date.ISOWeek()
-			intervalKey = fmt.Sprintf("%d-W%02d", year, week)
-		}
-
-		if existing, exists := intervalMap[intervalKey]; exists {
-			if point.Date > existing.Date {
-				intervalMap[intervalKey] = point
-			}
-		} else {
-			intervalMap[intervalKey] = point
-		}
-	}
-
-	sampled := make([]models.YieldDataPoint, 0, len(intervalMap))
-	for _, point := range intervalMap {
-		sampled = append(sampled, point)
-	}
-
-	sort.Slice(sampled, func(i, j int) bool {
-		return sampled[i].Date < sampled[j].Date
-	})
-
-	return sampled
-}
-
-func (s *TreasuryService) convertToHistoricalData(
-	feed *models.TreasuryFeed,
-	startDate, endDate time.Time,
-	period string,
-) (*models.HistoricalYieldData, error) {
-	var dataPoints []models.YieldDataPoint
-
-	for _, entry := range feed.Entries {
-		dateStr := entry.Date
-		if len(dateStr) > iso8601DateLength {
-			dateStr = dateStr[:iso8601DateLength]
-		}
-
-		entryDate, err := time.Parse("2006-01-02", dateStr)
-		if err != nil {
-			continue
-		}
-
-		if entryDate.Before(startDate) || entryDate.After(endDate) {
-			continue
-		}
-
-		dataPoints = append(dataPoints, models.YieldDataPoint{
-			Date:     dateStr,
-			Yield10Y: entry.BC10Year,
-			Yield5Y:  entry.BC5Year,
-			Yield2Y:  entry.BC2Year,
-		})
-	}
-
-	return &models.HistoricalYieldData{
-		Period:    period,
-		StartDate: startDate.Format("2006-01-02"),
-		EndDate:   endDate.Format("2006-01-02"),
-		Terms:     []string{"10Y", "5Y", "2Y"},
-		Data:      sampleDataPoints(dataPoints, period),
-	}, nil
-}
-
-// GetHistoricalYields returns historical data with permanent caching.
-// Uses double-checked locking to avoid redundant fetches under contention.
-func (s *TreasuryService) GetHistoricalYields(period string) (*models.HistoricalYieldData, error) {
-	s.historicalMu.RLock()
-	if cached, exists := s.historicalCache[period]; exists {
-		data := cached.data
-		s.historicalMu.RUnlock()
-		return data, nil
-	}
-	s.historicalMu.RUnlock()
-
-	s.historicalMu.Lock()
-	defer s.historicalMu.Unlock()
-
-	if cached, exists := s.historicalCache[period]; exists {
-		return cached.data, nil
-	}
-
-	log.Printf("Fetching historical yields for period %s (cache miss)", period)
-
-	startDate, endDate, err := calculateDateRange(period)
-	if err != nil {
-		return nil, err
-	}
-
-	var feed *models.TreasuryFeed
-	startYear := startDate.Year()
-	endYear := endDate.Year()
-
-	if startYear == endYear {
-		feed, err = s.fetchFromAPI()
-	} else {
-		feed, err = s.fetchFromAPIForYears(startYear, endYear)
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	data, err := s.convertToHistoricalData(feed, startDate, endDate, period)
-	if err != nil {
-		return nil, err
-	}
-
-	s.historicalCache[period] = &historicalCacheEntry{
-		data:      data,
-		timestamp: time.Now(),
-	}
-
-	return data, nil
-}
-
-// GetLatestYields returns current yields with 1-hour TTL caching.
-func (s *TreasuryService) GetLatestYields() (*models.YieldData, error) {
-	s.mu.RLock()
-	if s.cacheData != nil && time.Since(s.cacheTimestamp) < s.cacheDuration {
-		data := s.cacheData
-		s.mu.RUnlock()
-		return data, nil
-	}
-	s.mu.RUnlock()
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.cacheData != nil && time.Since(s.cacheTimestamp) < s.cacheDuration {
-		return s.cacheData, nil
-	}
-
-	feed, err := s.fetchFromAPI()
-	if err != nil {
-		return nil, err
-	}
-
-	data, err := s.convertToYieldData(feed)
-	if err != nil {
-		return nil, err
-	}
-
-	s.cacheData = data
-	s.cacheTimestamp = time.Now()
-
-	return data, nil
-}
-
-func (s *TreasuryService) WarmCache() {
-	log.Println("Warming historical yield cache...")
-	for _, period := range historicalPeriods {
-		go func(p string) {
-			start := time.Now()
-			if _, err := s.GetHistoricalYields(p); err != nil {
-				log.Printf("Cache warm failed for %s: %v", p, err)
-			} else {
-				log.Printf("Cache warmed for %s in %v", p, time.Since(start))
-			}
-		}(period)
-	}
 }

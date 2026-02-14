@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -11,14 +10,23 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
+	"github.com/shopspring/decimal"
+	"go.uber.org/zap"
 
 	"treasury-tracker/internal/database"
 	"treasury-tracker/internal/handlers"
 	"treasury-tracker/internal/services"
 )
+
+func init() {
+	// Ensure decimal.Decimal values marshal as JSON numbers (e.g. 4.52)
+	// instead of the default quoted strings (e.g. "4.52").
+	decimal.MarshalJSONWithoutQuotes = true
+}
 
 const (
 	serverPort         = ":8080"
@@ -30,19 +38,33 @@ const (
 )
 
 func main() {
+	var logger *zap.Logger
+	var err error
+	if os.Getenv("ENV") == "production" {
+		logger, err = zap.NewProduction()
+	} else {
+		logger, err = zap.NewDevelopment()
+	}
+	if err != nil {
+		panic("failed to initialize logger: " + err.Error())
+	}
+	defer logger.Sync()
+	zap.ReplaceGlobals(logger)
+
 	if err := godotenv.Load(); err != nil {
-		log.Println("No .env file found")
+		logger.Info("No .env file found")
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		log.Fatal("DATABASE_URL environment variable not set")
+		logger.Fatal("DATABASE_URL environment variable not set")
 	}
 
 	config, err := pgxpool.ParseConfig(dbURL)
 	if err != nil {
-		log.Fatalf("Unable to parse DATABASE_URL: %v", err)
+		logger.Fatal("Unable to parse DATABASE_URL", zap.Error(err))
 	}
 
 	config.MaxConns = 25
@@ -50,28 +72,36 @@ func main() {
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
-		log.Fatalf("Unable to connect to database: %v", err)
+		logger.Fatal("Unable to connect to database", zap.Error(err))
 	}
 	defer pool.Close()
 
 	if err := pool.Ping(ctx); err != nil {
-		log.Fatalf("Unable to ping database: %v", err)
+		logger.Fatal("Unable to ping database", zap.Error(err))
 	}
-	log.Println("Database connection established")
+	logger.Info("Database connection established")
 
 	queries := database.New(pool)
-	userHandler := handlers.NewUserHandler(queries)
+	userHandler := handlers.NewUserHandler(queries, logger)
 
-	treasuryService := services.NewTreasuryService()
-	treasuryService.WarmCache()
+	treasuryService := services.NewTreasuryService(queries, pool, logger)
+	if err := treasuryService.SyncYields(ctx); err != nil {
+		logger.Error("initial yield sync failed", zap.Error(err))
+	}
+	treasuryService.StartRefreshTicker(ctx)
+	treasuryService.StartWeeklySampler(ctx)
 
-	yieldHandler := handlers.NewYieldHandler(treasuryService)
+	yieldHandler := handlers.NewYieldHandler(treasuryService, logger)
 
-	txService := services.NewTransactionService(queries, pool)
-	txHandlers := handlers.NewTransactionHandlers(txService, queries, treasuryService)
-	holdingsHandlers := handlers.NewHoldingsHandlers(queries)
+	txService := services.NewTransactionService(queries, pool, logger)
+	txHandlers := handlers.NewTransactionHandlers(txService, queries, treasuryService, logger)
+	holdingsHandlers := handlers.NewHoldingsHandlers(queries, logger)
 
 	r := chi.NewRouter()
+
+	r.Use(middleware.RequestID)
+	r.Use(requestLogger(logger))
+	r.Use(middleware.Recoverer)
 
 	// Nginx proxy handles same-origin in production; these support direct API access during dev
 	allowedOrigins := []string{
@@ -122,9 +152,9 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("Starting server on %s", server.Addr)
+		logger.Info("Starting server", zap.String("addr", server.Addr))
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Failed to start server: %v", err)
+			logger.Fatal("Failed to start server", zap.Error(err))
 		}
 	}()
 
@@ -132,12 +162,30 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("Shutting down server...")
-	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
+	logger.Info("Shutting down server...")
+	cancel() // Stop ticker and background work
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer shutdownCancel()
 
-	if err := server.Shutdown(ctx); err != nil {
-		log.Fatalf("Server forced to shutdown: %v", err)
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		logger.Fatal("Server forced to shutdown", zap.Error(err))
 	}
-	log.Println("Server exited")
+	logger.Info("Server exited")
+}
+
+func requestLogger(logger *zap.Logger) func(next http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+			next.ServeHTTP(ww, r)
+			logger.Info("request",
+				zap.String("method", r.Method),
+				zap.String("path", r.URL.Path),
+				zap.Int("status", ww.Status()),
+				zap.Duration("duration", time.Since(start)),
+				zap.String("request_id", middleware.GetReqID(r.Context())),
+			)
+		})
+	}
 }

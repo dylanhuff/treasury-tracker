@@ -86,6 +86,19 @@ type Transaction struct {
 	HoldingID pgtype.Int4 `json:"holding_id"`
 }
 
+// Daily treasury yield curve data from treasury.gov, partitioned by year
+type TreasuryYield struct {
+	Date     pgtype.Date    `json:"date"`
+	Bc1month pgtype.Numeric `json:"bc_1month"`
+	Bc3month pgtype.Numeric `json:"bc_3month"`
+	Bc6month pgtype.Numeric `json:"bc_6month"`
+	Bc1year  pgtype.Numeric `json:"bc_1year"`
+	Bc2year  pgtype.Numeric `json:"bc_2year"`
+	Bc5year  pgtype.Numeric `json:"bc_5year"`
+	Bc10year pgtype.Numeric `json:"bc_10year"`
+	Bc30year pgtype.Numeric `json:"bc_30year"`
+}
+
 // User accounts with current balance
 type User struct {
 	ID        int32              `json:"id"`
