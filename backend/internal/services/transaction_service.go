@@ -139,7 +139,6 @@ func (s *TransactionService) WithdrawAccount(ctx context.Context, userID int32, 
 	return updatedUser, err
 }
 
-// BuyTreasury purchases a treasury security atomically.
 // T-Bills (1M-1Y) use discount pricing; Notes/Bonds (2Y-30Y) use par pricing.
 func (s *TransactionService) BuyTreasury(
 	ctx context.Context,
@@ -255,8 +254,7 @@ func (s *TransactionService) BuyTreasury(
 	}, nil
 }
 
-// SellTreasury sells a treasury holding (full or partial) and returns proceeds.
-// The caller is responsible for fetching and validating the holding exists.
+// Caller is responsible for fetching and validating the holding exists.
 func (s *TransactionService) SellTreasury(
 	ctx context.Context,
 	userID int32,
@@ -394,8 +392,6 @@ func calculateSellProceeds(holding database.Holding, sellAmount decimal.Decimal)
 	return maturityValue, nil
 }
 
-// numericToDecimal converts a pgtype.Numeric to decimal.Decimal without
-// intermediate float64 conversion, preserving full precision.
 func numericToDecimal(n pgtype.Numeric) (decimal.Decimal, error) {
 	if !n.Valid || n.NaN {
 		return decimal.Zero, fmt.Errorf("invalid numeric")

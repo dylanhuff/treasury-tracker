@@ -10,7 +10,6 @@ import (
 	"treasury-tracker/internal/services"
 )
 
-// mockTreasuryService implements services.TreasuryServiceInterface for unit tests.
 type mockTreasuryService struct {
 	latestYields   *models.YieldData
 	latestErr      error
@@ -26,7 +25,6 @@ func (m *mockTreasuryService) GetHistoricalYields(ctx context.Context, period st
 	return m.historicalData, m.historicalErr
 }
 
-// mockTransactionService implements services.TransactionServiceInterface for unit tests.
 type mockTransactionService struct {
 	fundResult     *database.User
 	fundErr        error
@@ -54,7 +52,6 @@ func (m *mockTransactionService) SellTreasury(ctx context.Context, userID int32,
 	return m.sellResult, m.sellErr
 }
 
-// sampleYieldData returns realistic test yield data for use in mock-based tests.
 func sampleYieldData() *models.YieldData {
 	return &models.YieldData{
 		Date: "2026-02-14",
@@ -71,7 +68,6 @@ func sampleYieldData() *models.YieldData {
 	}
 }
 
-// sampleHistoricalData returns realistic test historical yield data for use in mock-based tests.
 func sampleHistoricalData(period string) *models.HistoricalYieldData {
 	return &models.HistoricalYieldData{
 		Period:    period,
@@ -101,7 +97,6 @@ func sampleHistoricalData(period string) *models.HistoricalYieldData {
 	}
 }
 
-// sampleUser returns a database.User for use in mock-based tests.
 func sampleUser() *database.User {
 	balance := pgtype.Numeric{}
 	balance.Scan("100000.00")

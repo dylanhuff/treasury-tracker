@@ -46,7 +46,6 @@ func NewTreasuryService(queries *database.Queries, pool *pgxpool.Pool, logger *z
 	}
 }
 
-// ensurePartitionExists creates a yearly partition table if it does not already exist.
 func (s *TreasuryService) ensurePartitionExists(ctx context.Context, year int) error {
 	query := fmt.Sprintf(
 		`CREATE TABLE IF NOT EXISTS treasury_yields_%d PARTITION OF treasury_yields FOR VALUES FROM ('%d-01-01') TO ('%d-01-01')`,
@@ -59,8 +58,6 @@ func (s *TreasuryService) ensurePartitionExists(ctx context.Context, year int) e
 	return nil
 }
 
-// maybeCreateNextYearPartition proactively creates next year's partition
-// when we are within 30 days of January 1st.
 func (s *TreasuryService) maybeCreateNextYearPartition(ctx context.Context) {
 	now := time.Now()
 	nextYear := now.Year() + 1
@@ -75,10 +72,7 @@ func (s *TreasuryService) maybeCreateNextYearPartition(ctx context.Context) {
 	}
 }
 
-// filterByAge applies age-based sampling to XML entries before DB insertion:
-//   - Row age <= 1Y: keep all (daily)
-//   - Row age 1-5Y: keep latest per ISO week
-//   - Row age > 5Y: keep latest per calendar month
+// Sampling rules: <=1Y daily, 1-5Y weekly, >5Y monthly.
 func filterByAge(entries []models.Entry, now time.Time) []models.Entry {
 	if len(entries) == 0 {
 		return entries
@@ -144,9 +138,6 @@ func filterByAge(entries []models.Entry, now time.Time) []models.Entry {
 	return result
 }
 
-// SyncYields fetches treasury data for all years in parallel, skipping years
-// that already have data (except the current year which is always refreshed).
-// It closes the ready channel when complete to unblock background goroutines.
 func (s *TreasuryService) SyncYields(ctx context.Context) error {
 	defer s.readyOnce.Do(func() { close(s.ready) })
 
@@ -191,9 +182,7 @@ func (s *TreasuryService) SyncYields(ctx context.Context) error {
 	return nil
 }
 
-// fetchAndStoreYear fetches one year of data from treasury.gov, applies
-// age-based filtering, and upserts into the DB.
-// Wrapped in singleflight to prevent duplicate concurrent fetches of the same year.
+// Wrapped in singleflight to deduplicate concurrent fetches of the same year.
 func (s *TreasuryService) fetchAndStoreYear(ctx context.Context, year int) error {
 	key := fmt.Sprintf("fetch_year_%d", year)
 
@@ -268,9 +257,7 @@ func (s *TreasuryService) fetchAndStoreYear(ctx context.Context, year int) error
 	return err
 }
 
-// GetHistoricalYields queries the DB for yields in the given period and converts
-// to model types. No query-time sampling is needed since data is pre-sampled
-// at insertion time and by the weekly sampler.
+// No query-time sampling needed; data is pre-sampled at insertion and by the weekly sampler.
 func (s *TreasuryService) GetHistoricalYields(ctx context.Context, period string) (*models.HistoricalYieldData, error) {
 	startDate, endDate, err := calculateDateRange(period)
 	if err != nil {
@@ -304,7 +291,6 @@ func (s *TreasuryService) GetHistoricalYields(ctx context.Context, period string
 	}, nil
 }
 
-// GetLatestYields queries the DB for the most recent yield row and converts to models.YieldData.
 func (s *TreasuryService) GetLatestYields(ctx context.Context) (*models.YieldData, error) {
 	row, err := s.queries.GetLatestYield(ctx)
 	if err != nil {
@@ -326,8 +312,6 @@ func (s *TreasuryService) GetLatestYields(ctx context.Context) (*models.YieldDat
 	}, nil
 }
 
-// StartRefreshTicker starts a goroutine that fetches the current year's data hourly.
-// It waits for the initial warmup to complete before starting the ticker.
 func (s *TreasuryService) StartRefreshTicker(ctx context.Context) {
 	go func() {
 		<-s.ready
@@ -354,8 +338,6 @@ func (s *TreasuryService) StartRefreshTicker(ctx context.Context) {
 	}()
 }
 
-// StartWeeklySampler starts a goroutine that thins old data on a weekly schedule.
-// It waits for the initial warmup to complete before starting.
 func (s *TreasuryService) StartWeeklySampler(ctx context.Context) {
 	go func() {
 		<-s.ready
@@ -375,9 +357,7 @@ func (s *TreasuryService) StartWeeklySampler(ctx context.Context) {
 	}()
 }
 
-// sampleOldData deletes non-representative rows for old data:
-//   - Data older than 5 years: keep only one row per month
-//   - Data older than 1 year: keep only one row per week
+// Thins old data: >5Y keep monthly, >1Y keep weekly.
 func (s *TreasuryService) sampleOldData(ctx context.Context) {
 	now := time.Now()
 
@@ -399,7 +379,6 @@ func (s *TreasuryService) sampleOldData(ctx context.Context) {
 	}
 }
 
-// numericFromFloat converts a float64 to pgtype.Numeric.
 func numericFromFloat(f float64) pgtype.Numeric {
 	var n pgtype.Numeric
 	if err := n.Scan(fmt.Sprintf("%.3f", f)); err != nil {
@@ -408,8 +387,6 @@ func numericFromFloat(f float64) pgtype.Numeric {
 	return n
 }
 
-// numericToDecimalSafe converts a pgtype.Numeric to decimal.Decimal without
-// intermediate float64 conversion, returning Zero on error.
 func numericToDecimalSafe(n pgtype.Numeric) decimal.Decimal {
 	if !n.Valid || n.NaN || n.Int == nil {
 		return decimal.Zero

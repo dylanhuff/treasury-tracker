@@ -8,13 +8,11 @@ import (
 	"treasury-tracker/internal/models"
 )
 
-// TreasuryServiceInterface abstracts treasury yield operations for testability.
 type TreasuryServiceInterface interface {
 	GetLatestYields(ctx context.Context) (*models.YieldData, error)
 	GetHistoricalYields(ctx context.Context, period string) (*models.HistoricalYieldData, error)
 }
 
-// TransactionServiceInterface abstracts account and treasury transaction operations for testability.
 type TransactionServiceInterface interface {
 	FundAccount(ctx context.Context, userID int32, amount pgtype.Numeric) (*database.User, error)
 	WithdrawAccount(ctx context.Context, userID int32, amount pgtype.Numeric) (*database.User, error)

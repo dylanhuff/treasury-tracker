@@ -15,9 +15,6 @@ import (
 	"treasury-tracker/internal/testutil"
 )
 
-// TestE2E_FundBuySellWithdraw exercises the full transaction lifecycle:
-// fund -> buy -> sell -> withdraw.
-// Requires a running PostgreSQL database and real treasury.gov data.
 func TestE2E_FundBuySellWithdraw(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping E2E test in short mode")
@@ -36,12 +33,10 @@ func TestE2E_FundBuySellWithdraw(t *testing.T) {
 	treasuryService := services.NewTreasuryService(queries, pool, logger)
 	handler := NewTransactionHandlers(txService, queries, treasuryService, logger)
 
-	// Ensure yields are synced so BuyHandler can fetch current rates.
 	if err := treasuryService.SyncYields(ctx); err != nil {
 		t.Fatalf("SyncYields failed: %v", err)
 	}
 
-	// Create a test user with $0 balance.
 	testUser, err := queries.CreateUser(ctx, database.CreateUserParams{
 		Name:    "E2E Test User",
 		Balance: testutil.MustNumeric("0.00"),
@@ -99,7 +94,6 @@ func TestE2E_FundBuySellWithdraw(t *testing.T) {
 			t.Fatal("Buy response missing success or user")
 		}
 
-		// Balance should be less than 100000 (purchase price was deducted)
 		balance := testutil.MustFloat64(resp.User.Balance)
 		if balance >= 100000.00 {
 			t.Fatalf("Expected balance < 100000 after buy, got %f", balance)
@@ -107,7 +101,6 @@ func TestE2E_FundBuySellWithdraw(t *testing.T) {
 		t.Logf("Bought 6M T-Bill: face=%s, price=%s, discount=%s, balance=$%.2f",
 			resp.FaceValue, resp.PurchasePrice, resp.Discount, balance)
 
-		// Retrieve the holding ID for the sell step.
 		holdings, err := queries.GetActiveHoldingsByUser(ctx, testUser.ID)
 		if err != nil {
 			t.Fatalf("Failed to get holdings: %v", err)
@@ -148,7 +141,6 @@ func TestE2E_FundBuySellWithdraw(t *testing.T) {
 
 	// Step 4: Withdraw remaining balance and verify
 	t.Run("Withdraw", func(t *testing.T) {
-		// Get current balance first.
 		user, err := queries.GetUser(ctx, testUser.ID)
 		if err != nil {
 			t.Fatalf("Failed to get user: %v", err)
@@ -183,7 +175,6 @@ func TestE2E_FundBuySellWithdraw(t *testing.T) {
 		t.Logf("Withdrew $%.2f: final balance = $%.2f", currentBalance, finalBalance)
 	})
 
-	// Verify transaction history
 	transactions, err := queries.GetTransactionsByUser(ctx, testUser.ID)
 	if err != nil {
 		t.Fatalf("Failed to get transactions: %v", err)

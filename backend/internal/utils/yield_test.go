@@ -227,17 +227,14 @@ func TestCalculateBillPriceAllTerms(t *testing.T) {
 				return
 			}
 
-			// Price should always be less than or equal to face value
 			if price.GreaterThan(faceValue) {
 				t.Errorf("Price (%s) should not exceed face value (%s) for term %s", price.String(), faceValue.String(), term)
 			}
 
-			// Price should be positive
 			if price.LessThanOrEqual(decimal.Zero) {
 				t.Errorf("Price should be positive for term %s, got %s", term, price.String())
 			}
 
-			// Discount should increase with term length
 			discount := CalculateBillDiscount(faceValue, price)
 			if discount.LessThan(decimal.Zero) {
 				t.Errorf("Discount should be non-negative for term %s, got %s", term, discount.String())

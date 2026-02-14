@@ -71,12 +71,10 @@ func TestSyncYields(t *testing.T) {
 
 	ctx := context.Background()
 
-	// SyncYields fetches from the real treasury.gov API.
 	if err := service.SyncYields(ctx); err != nil {
 		t.Fatalf("SyncYields failed: %v", err)
 	}
 
-	// After sync, GetLatestYields should return data.
 	yieldData, err := service.GetLatestYields(ctx)
 	if err != nil {
 		t.Fatalf("GetLatestYields after sync failed: %v", err)
@@ -92,7 +90,6 @@ func TestSyncYields(t *testing.T) {
 		t.Errorf("Expected 8 yield points, got %d", len(yieldData.Yields))
 	}
 
-	// Verify each yield point has a valid term.
 	expectedTerms := map[string]bool{
 		"1M": true, "3M": true, "6M": true, "1Y": true,
 		"2Y": true, "5Y": true, "10Y": true, "30Y": true,
@@ -110,12 +107,10 @@ func TestGetHistoricalYields_AfterSync(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Sync first to ensure we have data.
 	if err := service.SyncYields(ctx); err != nil {
 		t.Fatalf("SyncYields failed: %v", err)
 	}
 
-	// Test multiple periods.
 	periods := []string{"1W", "1M", "3M"}
 	for _, period := range periods {
 		t.Run(period, func(t *testing.T) {
@@ -137,8 +132,6 @@ func TestGetHistoricalYields_AfterSync(t *testing.T) {
 				t.Error("Expected at least one term in historical data")
 			}
 
-			// For recent periods, we expect at least some data points (assuming
-			// the treasury.gov sync returned data for the current year).
 			t.Logf("Period %s: %d data points from %s to %s", period, len(data.Data), data.StartDate, data.EndDate)
 		})
 	}

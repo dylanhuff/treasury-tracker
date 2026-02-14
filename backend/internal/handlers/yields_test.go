@@ -38,7 +38,6 @@ func TestGetYields_Success(t *testing.T) {
 		t.Errorf("Expected 8 yield points, got %d", len(resp.Yields))
 	}
 
-	// Verify first and last yield points
 	if resp.Yields[0].Term != "1M" {
 		t.Errorf("Expected first term '1M', got '%s'", resp.Yields[0].Term)
 	}
