@@ -86,5 +86,8 @@ run_psql -d "$DB_NAME" -c "SELECT user_id, COUNT(*) as holdings_count FROM holdi
 echo -e "\n${GREEN}Total record counts:${NC}"
 run_psql -d "$DB_NAME" -c "SELECT 'users' as table_name, COUNT(*) as count FROM users UNION ALL SELECT 'transactions', COUNT(*) FROM transactions UNION ALL SELECT 'holdings', COUNT(*) FROM holdings;"
 
+echo -e "\n${GREEN}Treasury yields table (partitioned):${NC}"
+run_psql -d "$DB_NAME" -c "\d+ treasury_yields"
+
 echo -e "\n${GREEN}Deployment complete!${NC}"
 echo -e "${GREEN}Database: $DB_NAME${NC}"

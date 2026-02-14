@@ -89,6 +89,7 @@ func main() {
 		logger.Error("initial yield sync failed", zap.Error(err))
 	}
 	treasuryService.StartRefreshTicker(ctx)
+	treasuryService.StartWeeklySampler(ctx)
 
 	yieldHandler := handlers.NewYieldHandler(treasuryService, logger)
 

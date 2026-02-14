@@ -2,7 +2,9 @@ package services
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
@@ -22,10 +24,11 @@ func setupTreasuryTestService(t *testing.T) (*TreasuryService, *database.Queries
 		t.Skipf("Skipping integration test: database not available: %v", err)
 	}
 
-	// Ensure the treasury_yields table exists.
+	// Drop and recreate as partitioned table for test isolation.
+	_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS treasury_yields CASCADE")
 	_, err = pool.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS treasury_yields (
-			date        DATE PRIMARY KEY,
+		CREATE TABLE treasury_yields (
+			date        DATE NOT NULL,
 			bc_1month   NUMERIC,
 			bc_3month   NUMERIC,
 			bc_6month   NUMERIC,
@@ -33,17 +36,33 @@ func setupTreasuryTestService(t *testing.T) (*TreasuryService, *database.Queries
 			bc_2year    NUMERIC,
 			bc_5year    NUMERIC,
 			bc_10year   NUMERIC,
-			bc_30year   NUMERIC
-		)
+			bc_30year   NUMERIC,
+			PRIMARY KEY (date)
+		) PARTITION BY RANGE (date)
 	`)
 	if err != nil {
-		t.Skipf("Skipping integration test: cannot ensure treasury_yields table: %v", err)
+		t.Skipf("Skipping integration test: cannot create partitioned table: %v", err)
+	}
+
+	// Create partitions for the last 31 years + next year.
+	currentYear := time.Now().Year()
+	for y := currentYear - 30; y <= currentYear+1; y++ {
+		_, err := pool.Exec(ctx, fmt.Sprintf(
+			"CREATE TABLE IF NOT EXISTS treasury_yields_%d PARTITION OF treasury_yields FOR VALUES FROM ('%d-01-01') TO ('%d-01-01')",
+			y, y, y+1,
+		))
+		if err != nil {
+			t.Skipf("Skipping integration test: cannot create partition for %d: %v", y, err)
+		}
 	}
 
 	queries := database.New(pool)
 	service := NewTreasuryService(queries, pool, zap.NewNop())
 
-	return service, queries, func() { pool.Close() }
+	return service, queries, func() {
+		pool.Exec(context.Background(), "DROP TABLE IF EXISTS treasury_yields CASCADE")
+		pool.Close()
+	}
 }
 
 func TestSyncYields(t *testing.T) {
