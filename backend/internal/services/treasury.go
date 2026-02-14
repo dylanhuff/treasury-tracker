@@ -4,12 +4,12 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"sort"
 	"sync"
 	"time"
 
+	"go.uber.org/zap"
 	"treasury-tracker/internal/models"
 )
 
@@ -31,6 +31,7 @@ type TreasuryService struct {
 	cacheDuration  time.Duration
 	mu             sync.RWMutex
 	httpClient     *http.Client
+	logger         *zap.Logger
 
 	historicalCache map[string]*historicalCacheEntry
 	historicalMu    sync.RWMutex
@@ -38,13 +39,14 @@ type TreasuryService struct {
 
 var historicalPeriods = []string{"1W", "1M", "3M", "6M", "1Y", "5Y", "10Y", "30Y"}
 
-func NewTreasuryService() *TreasuryService {
+func NewTreasuryService(logger *zap.Logger) *TreasuryService {
 	return &TreasuryService{
 		cacheDuration: cacheDuration,
 		httpClient: &http.Client{
 			Timeout: httpTimeout,
 		},
 		historicalCache: make(map[string]*historicalCacheEntry),
+		logger:          logger,
 	}
 }
 
@@ -315,7 +317,7 @@ func (s *TreasuryService) GetHistoricalYields(period string) (*models.Historical
 		return cached.data, nil
 	}
 
-	log.Printf("Fetching historical yields for period %s (cache miss)", period)
+	s.logger.Info("Fetching historical yields (cache miss)", zap.String("period", period))
 
 	startDate, endDate, err := calculateDateRange(period)
 	if err != nil {
@@ -382,14 +384,14 @@ func (s *TreasuryService) GetLatestYields() (*models.YieldData, error) {
 }
 
 func (s *TreasuryService) WarmCache() {
-	log.Println("Warming historical yield cache...")
+	s.logger.Info("Warming historical yield cache...")
 	for _, period := range historicalPeriods {
 		go func(p string) {
 			start := time.Now()
 			if _, err := s.GetHistoricalYields(p); err != nil {
-				log.Printf("Cache warm failed for %s: %v", p, err)
+				s.logger.Error("Cache warm failed", zap.String("period", p), zap.Error(err))
 			} else {
-				log.Printf("Cache warmed for %s in %v", p, time.Since(start))
+				s.logger.Info("Cache warmed", zap.String("period", p), zap.Duration("duration", time.Since(start)))
 			}
 		}(period)
 	}

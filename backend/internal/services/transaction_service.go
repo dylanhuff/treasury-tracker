@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.uber.org/zap"
 	"treasury-tracker/internal/database"
 	"treasury-tracker/internal/utils"
 )
@@ -18,6 +18,7 @@ import (
 type TransactionService struct {
 	queries *database.Queries
 	pool    *pgxpool.Pool
+	logger  *zap.Logger
 }
 
 type PurchaseResult struct {
@@ -27,10 +28,11 @@ type PurchaseResult struct {
 	Discount      float64
 }
 
-func NewTransactionService(queries *database.Queries, pool *pgxpool.Pool) *TransactionService {
+func NewTransactionService(queries *database.Queries, pool *pgxpool.Pool, logger *zap.Logger) *TransactionService {
 	return &TransactionService{
 		queries: queries,
 		pool:    pool,
+		logger:  logger,
 	}
 }
 
@@ -379,8 +381,13 @@ func calculateSellProceeds(holding database.Holding, sellAmount float64) (float6
 		return 0, fmt.Errorf("failed to calculate maturity value: %w", err)
 	}
 
-	log.Printf("Selling %s holding: principal=%.2f, yield=%.2f%%, days_held=%d, proceeds=%.2f",
-		securityType, sellAmount, yieldRateFloat.Float64, daysHeld, maturityValue)
+	zap.L().Info("Selling holding",
+		zap.String("security_type", securityType),
+		zap.Float64("principal", sellAmount),
+		zap.Float64("yield", yieldRateFloat.Float64),
+		zap.Int("days_held", daysHeld),
+		zap.Float64("proceeds", maturityValue),
+	)
 
 	return maturityValue, nil
 }

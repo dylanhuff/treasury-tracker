@@ -4,12 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"go.uber.org/zap"
 	"treasury-tracker/internal/database"
 	"treasury-tracker/internal/models"
 	"treasury-tracker/internal/services"
@@ -19,17 +19,20 @@ type TransactionHandlers struct {
 	txService       *services.TransactionService
 	queries         *database.Queries
 	treasuryService *services.TreasuryService
+	logger          *zap.Logger
 }
 
 func NewTransactionHandlers(
 	txService *services.TransactionService,
 	queries *database.Queries,
 	treasuryService *services.TreasuryService,
+	logger *zap.Logger,
 ) *TransactionHandlers {
 	return &TransactionHandlers{
 		txService:       txService,
 		queries:         queries,
 		treasuryService: treasuryService,
+		logger:          logger,
 	}
 }
 
@@ -84,7 +87,7 @@ func (h *TransactionHandlers) FundHandler(w http.ResponseWriter, r *http.Request
 
 	user, err := h.txService.FundAccount(r.Context(), req.UserID, amount)
 	if err != nil {
-		log.Printf("Error funding account for user %d: %v", req.UserID, err)
+		h.logger.Error("Error funding account", zap.Int32("user_id", req.UserID), zap.Error(err))
 		respondWithServiceError(w, err)
 		return
 	}
@@ -107,7 +110,7 @@ func (h *TransactionHandlers) WithdrawHandler(w http.ResponseWriter, r *http.Req
 
 	user, err := h.txService.WithdrawAccount(r.Context(), req.UserID, amount)
 	if err != nil {
-		log.Printf("Error withdrawing from account for user %d: %v", req.UserID, err)
+		h.logger.Error("Error withdrawing from account", zap.Int32("user_id", req.UserID), zap.Error(err))
 		respondWithServiceError(w, err)
 		return
 	}
@@ -125,7 +128,7 @@ func (h *TransactionHandlers) GetUserTransactions(w http.ResponseWriter, r *http
 
 	transactions, err := h.queries.GetTransactionsByUser(r.Context(), int32(userID))
 	if err != nil {
-		log.Printf("Error fetching transactions for user %d: %v", userID, err)
+		h.logger.Error("Error fetching transactions", zap.Int64("user_id", userID), zap.Error(err))
 		respondWithError(w, http.StatusInternalServerError, "failed to fetch transactions")
 		return
 	}
@@ -147,7 +150,7 @@ func (h *TransactionHandlers) BuyHandler(w http.ResponseWriter, r *http.Request)
 
 	yieldData, err := h.treasuryService.GetLatestYields()
 	if err != nil {
-		log.Printf("Error fetching yield data: %v", err)
+		h.logger.Error("Error fetching yield data", zap.Error(err))
 		respondWithError(w, http.StatusInternalServerError, "failed to fetch current yield data")
 		return
 	}
@@ -172,7 +175,7 @@ func (h *TransactionHandlers) BuyHandler(w http.ResponseWriter, r *http.Request)
 
 	result, err := h.txService.BuyTreasury(r.Context(), req.UserID, req.Term, faceValueNumeric, currentYield)
 	if err != nil {
-		log.Printf("Error executing buy for user %d: %v", req.UserID, err)
+		h.logger.Error("Error executing buy", zap.Int32("user_id", req.UserID), zap.Error(err))
 		switch {
 		case errors.Is(err, services.ErrInsufficientBalance):
 			respondWithError(w, http.StatusBadRequest, err.Error())
@@ -206,7 +209,7 @@ func (h *TransactionHandlers) SellHandler(w http.ResponseWriter, r *http.Request
 
 	yieldData, err := h.treasuryService.GetLatestYields()
 	if err != nil {
-		log.Printf("Error fetching yield data for sell: %v", err)
+		h.logger.Error("Error fetching yield data for sell", zap.Error(err))
 		respondWithError(w, http.StatusInternalServerError, "failed to fetch current yield data")
 		return
 	}
@@ -231,7 +234,7 @@ func (h *TransactionHandlers) SellHandler(w http.ResponseWriter, r *http.Request
 
 	user, err := h.txService.SellTreasury(r.Context(), req.UserID, holding, amount, currentYield)
 	if err != nil {
-		log.Printf("Error executing sell for user %d: %v", req.UserID, err)
+		h.logger.Error("Error executing sell", zap.Int32("user_id", req.UserID), zap.Error(err))
 		respondWithServiceError(w, err)
 		return
 	}

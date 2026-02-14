@@ -1,18 +1,19 @@
 package handlers
 
 import (
-	"log"
 	"net/http"
 
+	"go.uber.org/zap"
 	"treasury-tracker/internal/services"
 )
 
 type YieldHandler struct {
 	treasuryService *services.TreasuryService
+	logger          *zap.Logger
 }
 
-func NewYieldHandler(treasuryService *services.TreasuryService) *YieldHandler {
-	return &YieldHandler{treasuryService: treasuryService}
+func NewYieldHandler(treasuryService *services.TreasuryService, logger *zap.Logger) *YieldHandler {
+	return &YieldHandler{treasuryService: treasuryService, logger: logger}
 }
 
 var validPeriods = map[string]struct{}{
@@ -23,7 +24,7 @@ var validPeriods = map[string]struct{}{
 func (h *YieldHandler) GetYields(w http.ResponseWriter, r *http.Request) {
 	yieldData, err := h.treasuryService.GetLatestYields()
 	if err != nil {
-		log.Printf("Error fetching treasury yields: %v", err)
+		h.logger.Error("Error fetching treasury yields", zap.Error(err))
 		respondWithError(w, http.StatusInternalServerError, "failed to fetch treasury data")
 		return
 	}
@@ -44,7 +45,7 @@ func (h *YieldHandler) GetHistoricalYields(w http.ResponseWriter, r *http.Reques
 
 	data, err := h.treasuryService.GetHistoricalYields(period)
 	if err != nil {
-		log.Printf("Error fetching historical yields: %v", err)
+		h.logger.Error("Error fetching historical yields", zap.Error(err))
 		respondWithError(w, http.StatusInternalServerError, "failed to fetch historical treasury data")
 		return
 	}

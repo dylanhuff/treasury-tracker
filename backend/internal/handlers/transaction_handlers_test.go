@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.uber.org/zap"
 	"treasury-tracker/internal/database"
 	"treasury-tracker/internal/services"
 	"treasury-tracker/internal/testutil"
@@ -25,10 +26,11 @@ func setupTestHandler(t *testing.T) (*TransactionHandlers, *database.Queries, fu
 		t.Skipf("Skipping integration test: database not available: %v", err)
 	}
 
+	logger := zap.NewNop()
 	queries := database.New(pool)
-	txService := services.NewTransactionService(queries, pool)
-	treasuryService := services.NewTreasuryService()
-	handler := NewTransactionHandlers(txService, queries, treasuryService)
+	txService := services.NewTransactionService(queries, pool, logger)
+	treasuryService := services.NewTreasuryService(logger)
+	handler := NewTransactionHandlers(txService, queries, treasuryService, logger)
 
 	return handler, queries, func() { pool.Close() }
 }

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.uber.org/zap"
 	"treasury-tracker/internal/database"
 	"treasury-tracker/internal/testutil"
 )
@@ -22,7 +23,7 @@ func setupTestService(t *testing.T) (*TransactionService, *database.Queries, fun
 	}
 
 	queries := database.New(pool)
-	service := NewTransactionService(queries, pool)
+	service := NewTransactionService(queries, pool, zap.NewNop())
 
 	return service, queries, func() { pool.Close() }
 }

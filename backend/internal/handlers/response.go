@@ -3,9 +3,9 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 
+	"go.uber.org/zap"
 	"treasury-tracker/internal/services"
 )
 
@@ -17,7 +17,7 @@ func respondWithJSON(w http.ResponseWriter, code int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
-		log.Printf("Error encoding response: %v", err)
+		zap.L().Error("Error encoding response", zap.Error(err))
 	}
 }
 
