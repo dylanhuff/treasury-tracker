@@ -15,9 +15,9 @@ func NewYieldHandler(treasuryService *services.TreasuryService) *YieldHandler {
 	return &YieldHandler{treasuryService: treasuryService}
 }
 
-var validPeriods = map[string]bool{
-	"1W": true, "1M": true, "3M": true, "6M": true,
-	"1Y": true, "5Y": true, "10Y": true, "30Y": true,
+var validPeriods = map[string]struct{}{
+	"1W": {}, "1M": {}, "3M": {}, "6M": {},
+	"1Y": {}, "5Y": {}, "10Y": {}, "30Y": {},
 }
 
 func (h *YieldHandler) GetYields(w http.ResponseWriter, r *http.Request) {
@@ -37,7 +37,7 @@ func (h *YieldHandler) GetHistoricalYields(w http.ResponseWriter, r *http.Reques
 		period = "3M"
 	}
 
-	if !validPeriods[period] {
+	if _, ok := validPeriods[period]; !ok {
 		respondWithError(w, http.StatusBadRequest, "invalid period: must be one of 1W, 1M, 3M, 6M, 1Y, 5Y, 10Y, 30Y")
 		return
 	}

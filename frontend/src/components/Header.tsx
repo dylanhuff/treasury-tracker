@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useCurrentUser } from '../contexts/CurrentUserContext';
 import { useTransactionRefresh } from '../contexts/TransactionRefreshContext';
 import { Select, SelectItem, Button } from '@tremor/react';
-import { QuestionMarkCircleIcon } from '@heroicons/react/24/outline';
+import { QuestionMarkCircleIcon, ArrowLeftIcon } from '@heroicons/react/24/outline';
 import { TransactionModal } from './TransactionModal';
 import { fetchUserHoldings } from '../services/api';
 import type { TransactionType } from '../types/transaction';
@@ -64,7 +64,14 @@ export function Header({ onStartTour }: HeaderProps) {
     <header className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 shadow-sm px-4 sm:px-6 py-4">
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 md:gap-6">
         {/* Logo/Title Section */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
+          <a
+            href="https://dylanhuff.com"
+            className="flex items-center gap-2 px-3 py-2.5 bg-gray-50 dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+          >
+            <ArrowLeftIcon className="h-4 w-4 text-gray-600 dark:text-gray-400" />
+            <span className="text-sm text-gray-600 dark:text-gray-400 whitespace-nowrap">dylanhuff.com</span>
+          </a>
           <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Dylan's Treasury Dashboard</h1>
         </div>
 
