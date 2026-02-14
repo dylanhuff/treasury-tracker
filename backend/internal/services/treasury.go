@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
 
 	"treasury-tracker/internal/database"
@@ -31,6 +31,7 @@ type TreasuryService struct {
 	httpClient *http.Client
 	logger     *zap.Logger
 	sfGroup    singleflight.Group
+	ready      chan struct{} // closed when warmup completes
 }
 
 func NewTreasuryService(queries *database.Queries, pool *pgxpool.Pool, logger *zap.Logger) *TreasuryService {
@@ -39,62 +40,153 @@ func NewTreasuryService(queries *database.Queries, pool *pgxpool.Pool, logger *z
 		pool:       pool,
 		httpClient: &http.Client{Timeout: httpTimeout},
 		logger:     logger,
+		ready:      make(chan struct{}),
 	}
 }
 
-// SyncYields checks the max date in the DB and fetches any missing years from the API.
-// If the DB is empty (max date is 1900-01-01), it starts from 30 years ago.
-func (s *TreasuryService) SyncYields(ctx context.Context) error {
-	maxDateRaw, err := s.queries.GetMaxYieldDate(ctx)
+// ensurePartitionExists creates a yearly partition table if it does not already exist.
+func (s *TreasuryService) ensurePartitionExists(ctx context.Context, year int) error {
+	query := fmt.Sprintf(
+		`CREATE TABLE IF NOT EXISTS treasury_yields_%d PARTITION OF treasury_yields FOR VALUES FROM ('%d-01-01') TO ('%d-01-01')`,
+		year, year, year+1,
+	)
+	_, err := s.pool.Exec(ctx, query)
 	if err != nil {
-		return fmt.Errorf("get max yield date: %w", err)
-	}
-
-	var maxDate time.Time
-	switch v := maxDateRaw.(type) {
-	case time.Time:
-		maxDate = v
-	case pgtype.Date:
-		if v.Valid {
-			maxDate = v.Time
-		} else {
-			maxDate = time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC)
-		}
-	default:
-		return fmt.Errorf("unexpected type for max_date: %T", maxDateRaw)
-	}
-
-	sentinel := time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC)
-	now := time.Now()
-
-	var startYear int
-	if maxDate.Equal(sentinel) || maxDate.Before(sentinel.AddDate(0, 0, 1)) {
-		startYear = now.Year() - 30
-		s.logger.Info("DB empty, syncing from 30 years ago", zap.Int("startYear", startYear))
-	} else {
-		startYear = maxDate.Year()
-		s.logger.Info("Syncing from max date year", zap.Time("maxDate", maxDate), zap.Int("startYear", startYear))
-	}
-
-	endYear := now.Year()
-
-	failures := 0
-	total := 0
-	for year := startYear; year <= endYear; year++ {
-		total++
-		if err := s.fetchAndStoreYear(ctx, year); err != nil {
-			s.logger.Error("failed to fetch year", zap.Int("year", year), zap.Error(err))
-			failures++
-		}
-	}
-
-	if failures > 0 && failures == total {
-		return fmt.Errorf("sync failed for all %d years", total)
+		return fmt.Errorf("ensure partition for year %d: %w", year, err)
 	}
 	return nil
 }
 
-// fetchAndStoreYear fetches one year of data from treasury.gov and upserts into the DB.
+// maybeCreateNextYearPartition proactively creates next year's partition
+// when we are within 30 days of January 1st.
+func (s *TreasuryService) maybeCreateNextYearPartition(ctx context.Context) {
+	now := time.Now()
+	nextYear := now.Year() + 1
+	nextJan1 := time.Date(nextYear, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	if nextJan1.Sub(now) <= 30*24*time.Hour {
+		if err := s.ensurePartitionExists(ctx, nextYear); err != nil {
+			s.logger.Error("failed to create next year partition", zap.Int("year", nextYear), zap.Error(err))
+		} else {
+			s.logger.Info("ensured next year partition exists", zap.Int("year", nextYear))
+		}
+	}
+}
+
+// filterByAge applies age-based sampling to XML entries before DB insertion:
+//   - Row age <= 1Y: keep all (daily)
+//   - Row age 1-5Y: keep latest per ISO week
+//   - Row age > 5Y: keep latest per calendar month
+func filterByAge(entries []models.Entry, now time.Time) []models.Entry {
+	if len(entries) == 0 {
+		return entries
+	}
+
+	oneYearAgo := now.AddDate(-1, 0, 0)
+	fiveYearsAgo := now.AddDate(-5, 0, 0)
+
+	var daily []models.Entry
+	weeklyMap := make(map[string]models.Entry)
+	monthlyMap := make(map[string]models.Entry)
+
+	for _, entry := range entries {
+		dateStr := entry.Date
+		if len(dateStr) > iso8601DateLength {
+			dateStr = dateStr[:iso8601DateLength]
+		}
+		date, err := time.Parse("2006-01-02", dateStr)
+		if err != nil {
+			continue
+		}
+
+		if date.After(oneYearAgo) || date.Equal(oneYearAgo) {
+			daily = append(daily, entry)
+		} else if date.After(fiveYearsAgo) {
+			year, week := date.ISOWeek()
+			key := fmt.Sprintf("%d-W%02d", year, week)
+			if existing, ok := weeklyMap[key]; ok {
+				existDate := existing.Date
+				if len(existDate) > iso8601DateLength {
+					existDate = existDate[:iso8601DateLength]
+				}
+				if dateStr > existDate {
+					weeklyMap[key] = entry
+				}
+			} else {
+				weeklyMap[key] = entry
+			}
+		} else {
+			key := date.Format("2006-01")
+			if existing, ok := monthlyMap[key]; ok {
+				existDate := existing.Date
+				if len(existDate) > iso8601DateLength {
+					existDate = existDate[:iso8601DateLength]
+				}
+				if dateStr > existDate {
+					monthlyMap[key] = entry
+				}
+			} else {
+				monthlyMap[key] = entry
+			}
+		}
+	}
+
+	result := make([]models.Entry, 0, len(daily)+len(weeklyMap)+len(monthlyMap))
+	result = append(result, daily...)
+	for _, e := range weeklyMap {
+		result = append(result, e)
+	}
+	for _, e := range monthlyMap {
+		result = append(result, e)
+	}
+	return result
+}
+
+// SyncYields fetches treasury data for all years in parallel, skipping years
+// that already have data (except the current year which is always refreshed).
+// It closes the ready channel when complete to unblock background goroutines.
+func (s *TreasuryService) SyncYields(ctx context.Context) error {
+	defer close(s.ready)
+
+	currentYear := time.Now().Year()
+	startYear := currentYear - 30
+
+	existingYears, err := s.queries.GetDistinctYieldYears(ctx)
+	if err != nil {
+		s.logger.Warn("failed to get existing years, will fetch all", zap.Error(err))
+		existingYears = nil
+	}
+
+	existing := make(map[int32]bool, len(existingYears))
+	for _, y := range existingYears {
+		existing[y] = true
+	}
+
+	g, gCtx := errgroup.WithContext(ctx)
+
+	for year := startYear; year <= currentYear; year++ {
+		y := year
+		if y != currentYear && existing[int32(y)] {
+			s.logger.Debug("skipping year with existing data", zap.Int("year", y))
+			continue
+		}
+
+		g.Go(func() error {
+			if err := s.ensurePartitionExists(gCtx, y); err != nil {
+				return err
+			}
+			return s.fetchAndStoreYear(gCtx, y)
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		s.logger.Error("sync yields completed with errors", zap.Error(err))
+	}
+	return nil
+}
+
+// fetchAndStoreYear fetches one year of data from treasury.gov, applies
+// age-based filtering, and upserts into the DB.
 // Wrapped in singleflight to prevent duplicate concurrent fetches of the same year.
 func (s *TreasuryService) fetchAndStoreYear(ctx context.Context, year int) error {
 	key := fmt.Sprintf("fetch_year_%d", year)
@@ -128,9 +220,14 @@ func (s *TreasuryService) fetchAndStoreYear(ctx context.Context, year int) error
 			return nil, fmt.Errorf("parse XML year %d: %w", year, err)
 		}
 
-		s.logger.Info("Parsed entries for year", zap.Int("year", year), zap.Int("count", len(feed.Entries)))
+		filtered := filterByAge(feed.Entries, time.Now())
+		s.logger.Info("Parsed and filtered entries for year",
+			zap.Int("year", year),
+			zap.Int("raw", len(feed.Entries)),
+			zap.Int("filtered", len(filtered)),
+		)
 
-		for _, entry := range feed.Entries {
+		for _, entry := range filtered {
 			dateStr := entry.Date
 			if len(dateStr) > iso8601DateLength {
 				dateStr = dateStr[:iso8601DateLength]
@@ -165,8 +262,9 @@ func (s *TreasuryService) fetchAndStoreYear(ctx context.Context, year int) error
 	return err
 }
 
-// GetHistoricalYields queries the DB for yields in the given period, converts to model types,
-// and applies density reduction via sampleDataPoints.
+// GetHistoricalYields queries the DB for yields in the given period and converts
+// to model types. No query-time sampling is needed since data is pre-sampled
+// at insertion time and by the weekly sampler.
 func (s *TreasuryService) GetHistoricalYields(ctx context.Context, period string) (*models.HistoricalYieldData, error) {
 	startDate, endDate, err := calculateDateRange(period)
 	if err != nil {
@@ -196,7 +294,7 @@ func (s *TreasuryService) GetHistoricalYields(ctx context.Context, period string
 		StartDate: startDate.Format("2006-01-02"),
 		EndDate:   endDate.Format("2006-01-02"),
 		Terms:     []string{"10Y", "5Y", "2Y"},
-		Data:      sampleDataPoints(dataPoints, period),
+		Data:      dataPoints,
 	}, nil
 }
 
@@ -223,9 +321,10 @@ func (s *TreasuryService) GetLatestYields(ctx context.Context) (*models.YieldDat
 }
 
 // StartRefreshTicker starts a goroutine that fetches the current year's data hourly.
-// It respects context cancellation for graceful shutdown.
+// It waits for the initial warmup to complete before starting the ticker.
 func (s *TreasuryService) StartRefreshTicker(ctx context.Context) {
 	go func() {
+		<-s.ready
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
 
@@ -236,12 +335,59 @@ func (s *TreasuryService) StartRefreshTicker(ctx context.Context) {
 				return
 			case <-ticker.C:
 				s.logger.Info("Hourly refresh: fetching current year data")
-				if err := s.fetchAndStoreYear(ctx, time.Now().Year()); err != nil {
+				currentYear := time.Now().Year()
+				if err := s.ensurePartitionExists(ctx, currentYear); err != nil {
+					s.logger.Error("failed to ensure current year partition", zap.Int("year", currentYear), zap.Error(err))
+				}
+				if err := s.fetchAndStoreYear(ctx, currentYear); err != nil {
 					s.logger.Error("Hourly refresh failed", zap.Error(err))
 				}
+				s.maybeCreateNextYearPartition(ctx)
 			}
 		}
 	}()
+}
+
+// StartWeeklySampler starts a goroutine that thins old data on a weekly schedule.
+// It waits for the initial warmup to complete before starting.
+func (s *TreasuryService) StartWeeklySampler(ctx context.Context) {
+	go func() {
+		<-s.ready
+		ticker := time.NewTicker(7 * 24 * time.Hour)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				s.logger.Info("Weekly sampler stopped")
+				return
+			case <-ticker.C:
+				s.logger.Info("Weekly sampler: thinning old data")
+				s.sampleOldData(ctx)
+			}
+		}
+	}()
+}
+
+// sampleOldData deletes non-representative rows for old data:
+//   - Data older than 5 years: keep only one row per month
+//   - Data older than 1 year: keep only one row per week
+func (s *TreasuryService) sampleOldData(ctx context.Context) {
+	now := time.Now()
+
+	fiveYearsAgo := pgtype.Date{Time: now.AddDate(-5, 0, 0), Valid: true}
+	if err := s.queries.DeleteNonMonthlySamples(ctx, fiveYearsAgo); err != nil {
+		s.logger.Error("monthly sampling failed", zap.Error(err))
+	} else {
+		s.logger.Info("monthly sampling complete")
+	}
+
+	oneYearAgo := pgtype.Date{Time: now.AddDate(-1, 0, 0), Valid: true}
+	if err := s.queries.DeleteNonWeeklySamples(ctx, oneYearAgo); err != nil {
+		s.logger.Error("weekly sampling failed", zap.Error(err))
+	} else {
+		s.logger.Info("weekly sampling complete")
+	}
 }
 
 // numericFromFloat converts a float64 to pgtype.Numeric.
@@ -287,62 +433,4 @@ func calculateDateRange(period string) (startDate, endDate time.Time, err error)
 	}
 
 	return startDate, endDate, nil
-}
-
-// sampleDataPoints reduces density for long periods (30Y: monthly, 10Y/5Y: weekly).
-func sampleDataPoints(dataPoints []models.YieldDataPoint, period string) []models.YieldDataPoint {
-	switch period {
-	case "1W", "1M", "3M", "6M", "1Y":
-		return dataPoints
-	}
-
-	if len(dataPoints) == 0 {
-		return dataPoints
-	}
-
-	var samplingInterval int
-	switch period {
-	case "30Y":
-		samplingInterval = 30
-	case "10Y", "5Y":
-		samplingInterval = 7
-	default:
-		return dataPoints
-	}
-
-	intervalMap := make(map[string]models.YieldDataPoint)
-
-	for _, point := range dataPoints {
-		date, err := time.Parse("2006-01-02", point.Date)
-		if err != nil {
-			continue
-		}
-
-		var intervalKey string
-		if samplingInterval == 30 {
-			intervalKey = date.Format("2006-01")
-		} else {
-			year, week := date.ISOWeek()
-			intervalKey = fmt.Sprintf("%d-W%02d", year, week)
-		}
-
-		if existing, exists := intervalMap[intervalKey]; exists {
-			if point.Date > existing.Date {
-				intervalMap[intervalKey] = point
-			}
-		} else {
-			intervalMap[intervalKey] = point
-		}
-	}
-
-	sampled := make([]models.YieldDataPoint, 0, len(intervalMap))
-	for _, point := range intervalMap {
-		sampled = append(sampled, point)
-	}
-
-	sort.Slice(sampled, func(i, j int) bool {
-		return sampled[i].Date < sampled[j].Date
-	})
-
-	return sampled
 }
