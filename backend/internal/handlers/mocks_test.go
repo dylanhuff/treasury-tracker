@@ -18,11 +18,11 @@ type mockTreasuryService struct {
 	historicalErr  error
 }
 
-func (m *mockTreasuryService) GetLatestYields() (*models.YieldData, error) {
+func (m *mockTreasuryService) GetLatestYields(ctx context.Context) (*models.YieldData, error) {
 	return m.latestYields, m.latestErr
 }
 
-func (m *mockTreasuryService) GetHistoricalYields(period string) (*models.HistoricalYieldData, error) {
+func (m *mockTreasuryService) GetHistoricalYields(ctx context.Context, period string) (*models.HistoricalYieldData, error) {
 	return m.historicalData, m.historicalErr
 }
 

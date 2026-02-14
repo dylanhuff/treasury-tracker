@@ -149,7 +149,7 @@ func (h *TransactionHandlers) BuyHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	yieldData, err := h.treasuryService.GetLatestYields()
+	yieldData, err := h.treasuryService.GetLatestYields(r.Context())
 	if err != nil {
 		h.logger.Error("Error fetching yield data", zap.Error(err))
 		respondWithError(w, http.StatusInternalServerError, "failed to fetch current yield data")
@@ -208,7 +208,7 @@ func (h *TransactionHandlers) SellHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	yieldData, err := h.treasuryService.GetLatestYields()
+	yieldData, err := h.treasuryService.GetLatestYields(r.Context())
 	if err != nil {
 		h.logger.Error("Error fetching yield data for sell", zap.Error(err))
 		respondWithError(w, http.StatusInternalServerError, "failed to fetch current yield data")

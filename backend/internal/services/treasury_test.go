@@ -58,7 +58,7 @@ func TestSyncYields(t *testing.T) {
 	}
 
 	// After sync, GetLatestYields should return data.
-	yieldData, err := service.GetLatestYields()
+	yieldData, err := service.GetLatestYields(ctx)
 	if err != nil {
 		t.Fatalf("GetLatestYields after sync failed: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestGetHistoricalYields_AfterSync(t *testing.T) {
 	periods := []string{"1W", "1M", "3M"}
 	for _, period := range periods {
 		t.Run(period, func(t *testing.T) {
-			data, err := service.GetHistoricalYields(period)
+			data, err := service.GetHistoricalYields(ctx, period)
 			if err != nil {
 				t.Fatalf("GetHistoricalYields(%s) failed: %v", period, err)
 			}

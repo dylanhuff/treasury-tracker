@@ -22,7 +22,7 @@ var validPeriods = map[string]struct{}{
 }
 
 func (h *YieldHandler) GetYields(w http.ResponseWriter, r *http.Request) {
-	yieldData, err := h.treasuryService.GetLatestYields()
+	yieldData, err := h.treasuryService.GetLatestYields(r.Context())
 	if err != nil {
 		h.logger.Error("Error fetching treasury yields", zap.Error(err))
 		respondWithError(w, http.StatusInternalServerError, "failed to fetch treasury data")
@@ -43,7 +43,7 @@ func (h *YieldHandler) GetHistoricalYields(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	data, err := h.treasuryService.GetHistoricalYields(period)
+	data, err := h.treasuryService.GetHistoricalYields(r.Context(), period)
 	if err != nil {
 		h.logger.Error("Error fetching historical yields", zap.Error(err))
 		respondWithError(w, http.StatusInternalServerError, "failed to fetch historical treasury data")

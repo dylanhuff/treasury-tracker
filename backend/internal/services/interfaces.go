@@ -10,8 +10,8 @@ import (
 
 // TreasuryServiceInterface abstracts treasury yield operations for testability.
 type TreasuryServiceInterface interface {
-	GetLatestYields() (*models.YieldData, error)
-	GetHistoricalYields(period string) (*models.HistoricalYieldData, error)
+	GetLatestYields(ctx context.Context) (*models.YieldData, error)
+	GetHistoricalYields(ctx context.Context, period string) (*models.HistoricalYieldData, error)
 }
 
 // TransactionServiceInterface abstracts account and treasury transaction operations for testability.

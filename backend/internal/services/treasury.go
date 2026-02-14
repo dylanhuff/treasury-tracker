@@ -167,9 +167,7 @@ func (s *TreasuryService) fetchAndStoreYear(ctx context.Context, year int) error
 
 // GetHistoricalYields queries the DB for yields in the given period, converts to model types,
 // and applies density reduction via sampleDataPoints.
-func (s *TreasuryService) GetHistoricalYields(period string) (*models.HistoricalYieldData, error) {
-	ctx := context.Background()
-
+func (s *TreasuryService) GetHistoricalYields(ctx context.Context, period string) (*models.HistoricalYieldData, error) {
 	startDate, endDate, err := calculateDateRange(period)
 	if err != nil {
 		return nil, err
@@ -203,9 +201,7 @@ func (s *TreasuryService) GetHistoricalYields(period string) (*models.Historical
 }
 
 // GetLatestYields queries the DB for the most recent yield row and converts to models.YieldData.
-func (s *TreasuryService) GetLatestYields() (*models.YieldData, error) {
-	ctx := context.Background()
-
+func (s *TreasuryService) GetLatestYields(ctx context.Context) (*models.YieldData, error) {
 	row, err := s.queries.GetLatestYield(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("get latest yield: %w", err)
@@ -251,17 +247,19 @@ func (s *TreasuryService) StartRefreshTicker(ctx context.Context) {
 // numericFromFloat converts a float64 to pgtype.Numeric.
 func numericFromFloat(f float64) pgtype.Numeric {
 	var n pgtype.Numeric
-	n.Scan(fmt.Sprintf("%.3f", f))
+	if err := n.Scan(fmt.Sprintf("%.3f", f)); err != nil {
+		zap.L().Error("failed to scan numeric from float", zap.Float64("value", f), zap.Error(err))
+	}
 	return n
 }
 
-// numericToDecimalSafe converts a pgtype.Numeric to decimal.Decimal, returning Zero on error.
+// numericToDecimalSafe converts a pgtype.Numeric to decimal.Decimal without
+// intermediate float64 conversion, returning Zero on error.
 func numericToDecimalSafe(n pgtype.Numeric) decimal.Decimal {
-	f, err := n.Float64Value()
-	if err != nil || !f.Valid {
+	if !n.Valid || n.NaN || n.Int == nil {
 		return decimal.Zero
 	}
-	return decimal.NewFromFloat(f.Float64)
+	return decimal.NewFromBigInt(n.Int, n.Exp)
 }
 
 func calculateDateRange(period string) (startDate, endDate time.Time, err error) {

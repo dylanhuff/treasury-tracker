@@ -38,11 +38,11 @@ func NewTransactionService(queries *database.Queries, pool *pgxpool.Pool, logger
 }
 
 func (s *TransactionService) FundAccount(ctx context.Context, userID int32, amount pgtype.Numeric) (*database.User, error) {
-	amountFloat, err := amount.Float64Value()
+	amountDec, err := numericToDecimal(amount)
 	if err != nil {
 		return nil, &ValidationError{Message: "invalid amount format"}
 	}
-	if !amountFloat.Valid || amountFloat.Float64 <= 0 {
+	if amountDec.LessThanOrEqual(decimal.Zero) {
 		return nil, &ValidationError{Message: "amount must be greater than zero"}
 	}
 
@@ -80,11 +80,11 @@ func (s *TransactionService) FundAccount(ctx context.Context, userID int32, amou
 }
 
 func (s *TransactionService) WithdrawAccount(ctx context.Context, userID int32, amount pgtype.Numeric) (*database.User, error) {
-	amountFloat, err := amount.Float64Value()
+	amountDec, err := numericToDecimal(amount)
 	if err != nil {
 		return nil, &ValidationError{Message: "invalid amount format"}
 	}
-	if !amountFloat.Valid || amountFloat.Float64 <= 0 {
+	if amountDec.LessThanOrEqual(decimal.Zero) {
 		return nil, &ValidationError{Message: "amount must be greater than zero"}
 	}
 
@@ -98,16 +98,16 @@ func (s *TransactionService) WithdrawAccount(ctx context.Context, userID int32, 
 			return fmt.Errorf("failed to get user: %w", err)
 		}
 
-		currentBalanceFloat, err := currentUser.Balance.Float64Value()
+		currentBalanceDec, err := numericToDecimal(currentUser.Balance)
 		if err != nil {
 			return fmt.Errorf("invalid balance format: %w", err)
 		}
-		if !currentBalanceFloat.Valid || currentBalanceFloat.Float64 < amountFloat.Float64 {
+		if currentBalanceDec.LessThan(amountDec) {
 			return ErrInsufficientBalance
 		}
 
 		negativeAmount := pgtype.Numeric{}
-		if err := negativeAmount.Scan(fmt.Sprintf("-%.2f", amountFloat.Float64)); err != nil {
+		if err := negativeAmount.Scan("-" + amountDec.StringFixed(2)); err != nil {
 			return fmt.Errorf("failed to create negative amount: %w", err)
 		}
 
@@ -394,13 +394,16 @@ func calculateSellProceeds(holding database.Holding, sellAmount decimal.Decimal)
 	return maturityValue, nil
 }
 
-// numericToDecimal converts a pgtype.Numeric to decimal.Decimal.
+// numericToDecimal converts a pgtype.Numeric to decimal.Decimal without
+// intermediate float64 conversion, preserving full precision.
 func numericToDecimal(n pgtype.Numeric) (decimal.Decimal, error) {
-	f, err := n.Float64Value()
-	if err != nil || !f.Valid {
+	if !n.Valid || n.NaN {
 		return decimal.Zero, fmt.Errorf("invalid numeric")
 	}
-	return decimal.NewFromFloat(f.Float64), nil
+	if n.Int == nil {
+		return decimal.Zero, nil
+	}
+	return decimal.NewFromBigInt(n.Int, n.Exp), nil
 }
 
 func handleBalanceConstraint(err error) error {
