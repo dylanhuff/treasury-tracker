@@ -162,7 +162,7 @@ func (s *TreasuryService) SyncYields(ctx context.Context) error {
 		existing[y] = true
 	}
 
-	g, gCtx := errgroup.WithContext(ctx)
+	g := new(errgroup.Group)
 
 	for year := startYear; year <= currentYear; year++ {
 		y := year
@@ -172,16 +172,19 @@ func (s *TreasuryService) SyncYields(ctx context.Context) error {
 		}
 
 		g.Go(func() error {
-			if err := s.ensurePartitionExists(gCtx, y); err != nil {
-				return err
+			if err := s.ensurePartitionExists(ctx, y); err != nil {
+				s.logger.Error("failed to create partition", zap.Int("year", y), zap.Error(err))
+				return nil // don't fail other goroutines
 			}
-			return s.fetchAndStoreYear(gCtx, y)
+			if err := s.fetchAndStoreYear(ctx, y); err != nil {
+				s.logger.Error("failed to fetch year", zap.Int("year", y), zap.Error(err))
+				return nil // don't fail other goroutines
+			}
+			return nil
 		})
 	}
 
-	if err := g.Wait(); err != nil {
-		s.logger.Error("sync yields completed with errors", zap.Error(err))
-	}
+	g.Wait()
 	return nil
 }
 
