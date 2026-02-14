@@ -16,13 +16,17 @@ type Querier interface {
 	GetActiveHoldingsByUser(ctx context.Context, userID int32) ([]Holding, error)
 	GetHoldingByID(ctx context.Context, id int32) (Holding, error)
 	GetHoldingsByUser(ctx context.Context, userID int32) ([]Holding, error)
+	GetLatestYield(ctx context.Context) (TreasuryYield, error)
+	GetMaxYieldDate(ctx context.Context) (interface{}, error)
 	GetTransactionByID(ctx context.Context, id int32) (Transaction, error)
 	GetTransactionsByUser(ctx context.Context, userID int32) ([]Transaction, error)
 	GetUser(ctx context.Context, id int32) (User, error)
 	GetUserForUpdate(ctx context.Context, id int32) (User, error)
+	GetYieldsByDateRange(ctx context.Context, arg GetYieldsByDateRangeParams) ([]TreasuryYield, error)
 	ListUsers(ctx context.Context) ([]User, error)
 	UpdateHoldingRemainingAmount(ctx context.Context, arg UpdateHoldingRemainingAmountParams) (Holding, error)
 	UpdateUserBalance(ctx context.Context, arg UpdateUserBalanceParams) (User, error)
+	UpsertTreasuryYield(ctx context.Context, arg UpsertTreasuryYieldParams) error
 }
 
 var _ Querier = (*Queries)(nil)

@@ -76,8 +76,11 @@ func main() {
 	queries := database.New(pool)
 	userHandler := handlers.NewUserHandler(queries, logger)
 
-	treasuryService := services.NewTreasuryService(logger)
-	treasuryService.WarmCache()
+	treasuryService := services.NewTreasuryService(queries, pool, logger)
+	if err := treasuryService.SyncYields(ctx); err != nil {
+		logger.Error("initial yield sync failed", zap.Error(err))
+	}
+	treasuryService.StartRefreshTicker(ctx)
 
 	yieldHandler := handlers.NewYieldHandler(treasuryService, logger)
 

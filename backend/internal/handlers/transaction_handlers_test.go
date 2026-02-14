@@ -29,7 +29,7 @@ func setupTestHandler(t *testing.T) (*TransactionHandlers, *database.Queries, fu
 	logger := zap.NewNop()
 	queries := database.New(pool)
 	txService := services.NewTransactionService(queries, pool, logger)
-	treasuryService := services.NewTreasuryService(logger)
+	treasuryService := services.NewTreasuryService(queries, pool, logger)
 	handler := NewTransactionHandlers(txService, queries, treasuryService, logger)
 
 	return handler, queries, func() { pool.Close() }
