@@ -167,7 +167,8 @@ Schema is in `backend/db/schema.sql` and is automatically applied via Docker.
 │       ├── contexts/        # React contexts
 │       └── types/           # TypeScript types
 ├── docker-compose.yml       # Docker orchestration
-└── deploy.sh                # Production deployment script
+├── deploy-local.sh          # Deploy on the current machine
+└── deploy-remote.sh         # Deploy to a remote host via SSH
 ```
 
 ## Testing
@@ -226,6 +227,22 @@ docker compose logs -f
 docker compose logs -f backend
 docker compose logs -f frontend
 ```
+
+## Deployment
+
+### Deploy locally (on the host machine)
+```bash
+./deploy-local.sh
+```
+Builds and starts all containers with `docker compose` on the current machine. Requires Docker and a `.env` file.
+
+### Deploy remotely (from another machine via SSH)
+```bash
+./deploy-remote.sh
+```
+Rsyncs the project to a remote host and builds there. Requires `DEPLOY_HOST` and `DEPLOY_DIR` set in `.env`.
+
+Both scripts source `.env` for configuration. See `.env.example` for available options.
 
 ## Notes
 
