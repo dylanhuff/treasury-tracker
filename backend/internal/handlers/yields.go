@@ -8,11 +8,11 @@ import (
 )
 
 type YieldHandler struct {
-	treasuryService *services.TreasuryService
+	treasuryService services.TreasuryServiceInterface
 	logger          *zap.Logger
 }
 
-func NewYieldHandler(treasuryService *services.TreasuryService, logger *zap.Logger) *YieldHandler {
+func NewYieldHandler(treasuryService services.TreasuryServiceInterface, logger *zap.Logger) *YieldHandler {
 	return &YieldHandler{treasuryService: treasuryService, logger: logger}
 }
 

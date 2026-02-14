@@ -10,11 +10,11 @@ import (
 )
 
 type HoldingsHandlers struct {
-	queries *database.Queries
+	queries database.Querier
 	logger  *zap.Logger
 }
 
-func NewHoldingsHandlers(queries *database.Queries, logger *zap.Logger) *HoldingsHandlers {
+func NewHoldingsHandlers(queries database.Querier, logger *zap.Logger) *HoldingsHandlers {
 	return &HoldingsHandlers{queries: queries, logger: logger}
 }
 

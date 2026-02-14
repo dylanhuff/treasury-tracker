@@ -8,11 +8,11 @@ import (
 )
 
 type UserHandler struct {
-	queries *database.Queries
+	queries database.Querier
 	logger  *zap.Logger
 }
 
-func NewUserHandler(queries *database.Queries, logger *zap.Logger) *UserHandler {
+func NewUserHandler(queries database.Querier, logger *zap.Logger) *UserHandler {
 	return &UserHandler{queries: queries, logger: logger}
 }
 

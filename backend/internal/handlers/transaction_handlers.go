@@ -16,16 +16,16 @@ import (
 )
 
 type TransactionHandlers struct {
-	txService       *services.TransactionService
-	queries         *database.Queries
-	treasuryService *services.TreasuryService
+	txService       services.TransactionServiceInterface
+	queries         database.Querier
+	treasuryService services.TreasuryServiceInterface
 	logger          *zap.Logger
 }
 
 func NewTransactionHandlers(
-	txService *services.TransactionService,
-	queries *database.Queries,
-	treasuryService *services.TreasuryService,
+	txService services.TransactionServiceInterface,
+	queries database.Querier,
+	treasuryService services.TreasuryServiceInterface,
 	logger *zap.Logger,
 ) *TransactionHandlers {
 	return &TransactionHandlers{
