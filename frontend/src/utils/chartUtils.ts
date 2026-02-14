@@ -1,5 +1,8 @@
 import type { HistoricalDataPoint } from '../services/api';
 
+type YieldKey = '10Y' | '5Y' | '2Y';
+const YIELD_KEYS: YieldKey[] = ['10Y', '5Y', '2Y'];
+
 /**
  * Resamples historical yield data to evenly-spaced time points using linear interpolation.
  * Fixes non-linear x-axis caused by variable data density (daily recent vs monthly old data).
@@ -23,11 +26,6 @@ export function resampleTimeSeries(
 
   const step = (endTime - startTime) / (targetPoints - 1);
   const resampled: HistoricalDataPoint[] = [];
-
-  const yieldKeys = Object.keys(sorted[0]).filter(
-    (k) => k !== 'date' && typeof (sorted[0] as Record<string, unknown>)[k] === 'number'
-  );
-
   let srcIdx = 0;
 
   for (let i = 0; i < targetPoints; i++) {
@@ -53,18 +51,20 @@ export function resampleTimeSeries(
     const t2 = new Date(p2.date).getTime();
     const factor = t2 === t1 ? 0 : (targetTime - t1) / (t2 - t1);
 
-    const point: Record<string, unknown> = { date: toDateStr(targetTime) };
-    for (const key of yieldKeys) {
-      const v1 = (p1 as Record<string, unknown>)[key] as number;
-      const v2 = (p2 as Record<string, unknown>)[key] as number;
-      if (typeof v1 === 'number' && typeof v2 === 'number') {
-        point[key] = v1 + (v2 - v1) * factor;
-      } else {
-        point[key] = typeof v1 === 'number' ? v1 : 0;
-      }
+    const point: HistoricalDataPoint = {
+      date: toDateStr(targetTime),
+      '10Y': 0,
+      '5Y': 0,
+      '2Y': 0,
+    };
+
+    for (const key of YIELD_KEYS) {
+      const v1 = p1[key];
+      const v2 = p2[key];
+      point[key] = v1 + (v2 - v1) * factor;
     }
 
-    resampled.push(point as HistoricalDataPoint);
+    resampled.push(point);
   }
 
   return resampled;
