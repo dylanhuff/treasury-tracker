@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { LineChart, Card, Title, Select, SelectItem } from '@tremor/react';
 import { fetchHistoricalYields } from '../services/api';
+import { resampleTimeSeries } from '../utils/chartUtils';
 import type { HistoricalYieldData } from '../services/api';
 
 type SelectableTerm = "2Y" | "5Y" | "10Y";
@@ -60,12 +61,16 @@ export default function YieldCurve() {
     });
   };
 
-  // Transform data: add formatted date field for cleaner x-axis
-  const rawChartData = historicalData?.data || [];
-  const chartData = rawChartData.map(point => ({
-    ...point,
-    displayDate: formatDateShort(point.date as string)
-  }));
+  // Resample data to uniform density so x-axis is a linear time scale.
+  // Without this, recent daily data dominates older monthly data on the axis.
+  const chartData = useMemo(() => {
+    const raw = historicalData?.data || [];
+    const resampled = resampleTimeSeries(raw, 300);
+    return resampled.map(point => ({
+      ...point,
+      displayDate: formatDateShort(point.date as string),
+    }));
+  }, [historicalData]);
 
   const calculateYAxisRange = () => {
     if (chartData.length === 0 || selectedTerms.length === 0) {
@@ -218,7 +223,7 @@ export default function YieldCurve() {
         // X-axis improvements
         xAxisLabel="Date"
         startEndOnly={false}  // Show multiple dates
-        tickGap={selectedPeriod === '1Y' ? 30 : selectedPeriod === '6M' ? 20 : 10}  // Adaptive tick density
+        tickGap={30}  // ~10 labels across 300 resampled points
       />
     </Card>
   );
